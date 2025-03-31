@@ -7,6 +7,14 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 app.use(cors());
 
+function generateRoomId() {
+  return Math.random().toString(36).substring(2, 8).toUpperCase();
+}
+
+function generateId() {
+  return uuidv4();
+}
+
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
@@ -487,7 +495,7 @@ io.on('connection', (socket) => {
         id: roomId,
         isPublic,
         players: [],
-        gameState: 'waiting',
+        status: 'waiting',
         currentDrawer: null,
         word: '',
         wordOptions: [],
@@ -498,7 +506,8 @@ io.on('connection', (socket) => {
         currentHint: '',
         hintNumber: 0,
         isGameOver: false,
-        winners: []
+        winners: [],
+        timer: null
       };
 
       // Add the creator as the first player and host
@@ -599,7 +608,7 @@ io.on('connection', (socket) => {
 
       // Broadcast updated game state
       io.to(roomId).emit('gameState', {
-        state: room.gameState,
+        state: room.status,
         players: room.players,
         currentDrawer: room.currentDrawer,
         word: room.word,
@@ -946,7 +955,7 @@ io.on('connection', (socket) => {
         room.players[playerIndex].disconnected = true;
 
         // If the disconnected player was the drawer, end the round
-        if (room.currentDrawer === socket.id && room.gameState === 'playing') {
+        if (room.currentDrawer === socket.id && room.status === 'playing') {
           endRound(roomId);
         }
 
@@ -957,6 +966,9 @@ io.on('connection', (socket) => {
           setTimeout(() => {
             if (rooms[roomId] && rooms[roomId].players.every(p => p.disconnected)) {
               console.log(`Cleaning up empty room: ${roomId}`);
+              if (rooms[roomId].timer) {
+                clearInterval(rooms[roomId].timer);
+              }
               delete rooms[roomId];
             }
           }, ROOM_CLEANUP_INTERVAL);
@@ -972,7 +984,7 @@ io.on('connection', (socket) => {
 
         // Broadcast updated game state
         io.to(roomId).emit('gameState', {
-          state: room.gameState,
+          state: room.status,
           players: room.players,
           currentDrawer: room.currentDrawer,
           word: room.word,
