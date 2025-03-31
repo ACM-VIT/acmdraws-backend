@@ -590,100 +590,70 @@ io.on('connection', (socket) => {
         throw new Error('Room not found or expired');
       }
 
-      // Check if the room is full (excluding disconnected players)
+      // Get count of active players (not disconnected)
       const activePlayers = room.players.filter(p => !p.disconnected);
+      
+      // Check if the room is full (max 12 active players)
       if (activePlayers.length >= 12) {
         throw new Error('Room is full');
       }
 
       // Check if username is already taken by an active player
-      const existingPlayer = room.players.find(p => 
-        p.username === username && !p.disconnected
-      );
-
-      // if (existingPlayer) {
-      //   throw new Error('Username is already taken');
-      // }
-
-      // Check if this player was previously in the room but disconnected
-      const disconnectedPlayerIndex = room.players.findIndex(p => 
-        p.username === username && p.disconnected
-      );
-
-      if (disconnectedPlayerIndex !== -1) {
-        // Reconnect the player
-        const player = room.players[disconnectedPlayerIndex];
-        player.id = socket.id;
-        player.disconnected = false;
-        player.avatar = avatar || player.avatar;
-
-        // Store user info
-        users.set(socket.id, {
-          username,
-          roomId,
-          avatar: player.avatar
-        });
-
-        // Join the socket to the room
-        socket.join(roomId);
-
-        // If this was the drawer before disconnecting, restore their status
-        if (room.currentDrawerName === username) {
-          room.currentDrawer = socket.id;
-        }
-
-        // Send reconnection message
-        io.to(roomId).emit('chatMessage', {
-          id: generateId(),
-          username: 'System',
-          message: `${username} reconnected`,
-          isSystemMessage: true
-        });
-
-        console.log(`Player ${username} reconnected to room: ${roomId}`);
-      } else {
-        // Add as a new player
-        const player = {
-          id: socket.id,
-          username: username,
-          score: 0,
-          isHost: false,
-          isDrawing: false,
-          hasGuessedCorrectly: false,
-          avatar: avatar || Math.floor(Math.random() * 10),
-          disconnected: false,
-          hasBeenDrawer: false
-        };
-
-        room.players.push(player);
-
-        // Store user info
-        users.set(socket.id, {
-          username,
-          roomId,
-          avatar: player.avatar
-        });
-
-        // Join the socket to the room
-        socket.join(roomId);
-
-        // Send welcome message
-        io.to(roomId).emit('chatMessage', {
-          id: generateId(),
-          username: 'System',
-          message: `${username} joined the room`,
-          isSystemMessage: true
-        });
-
-        console.log(`Player ${username} joined room: ${roomId}`);
+      const existingActivePlayer = activePlayers.find(p => p.username === username);
+      if (existingActivePlayer) {
+        throw new Error('Username is already taken');
       }
+
+      // Remove any existing disconnected player with the same username
+      room.players = room.players.filter(p => !(p.username === username && p.disconnected));
+
+      // Add as a new player
+      const player = {
+        id: socket.id,
+        username: username,
+        score: 0,
+        isHost: false,
+        isDrawing: false,
+        hasGuessedCorrectly: false,
+        avatar: avatar || Math.floor(Math.random() * 10),
+        disconnected: false,
+        hasBeenDrawer: false
+      };
+
+      room.players.push(player);
+
+      // Store user info
+      users.set(socket.id, {
+        username,
+        roomId,
+        avatar: player.avatar
+      });
+
+      // Join the socket to the room
+      socket.join(roomId);
+
+      // Send welcome message
+      io.to(roomId).emit('chatMessage', {
+        id: generateId(),
+        username: 'System',
+        message: `${username} joined the room`,
+        isSystemMessage: true
+      });
+
+      console.log(`Player ${username} joined room: ${roomId}`);
 
       // Update public rooms if necessary
       if (room.isPublic) {
         updatePublicRoomInfo(roomId);
       }
 
-      // Broadcast updated game state
+      // Send joined room confirmation to the client
+      socket.emit('joinedRoom', {
+        roomId,
+        players: room.players
+      });
+
+      // Broadcast updated game state to all clients
       io.to(roomId).emit('gameState', {
         state: room.status,
         players: room.players,
