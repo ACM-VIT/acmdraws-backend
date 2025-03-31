@@ -386,6 +386,7 @@ function endGame(roomId) {
 io.on('connection', (socket) => {
   console.log(`User connected: ${socket.id}`);
   
+  /*
   const reconnectUser = async () => {
     const previousSession = disconnectedUsers.get(socket.handshake.address);
     if (previousSession) {
@@ -402,10 +403,13 @@ io.on('connection', (socket) => {
   };
   
   reconnectUser();
+  */
   
   socket.on('createRoom', ({ username, isPublic = false, avatar = 0 }) => {
     try {
       console.log(`Creating ${isPublic ? 'public' : 'private'} room for ${username} (${socket.id})`);
+      
+      disconnectedUsers.delete(socket.handshake.address);
       
       const room = createRoomState(isPublic, socket.id, username, avatar);
       
@@ -450,6 +454,8 @@ io.on('connection', (socket) => {
         socket.emit('errorMessage', 'Game in progress, cannot join');
         return;
       }
+      
+      disconnectedUsers.delete(socket.handshake.address);
       
       room.players.push({
         id: socket.id,
@@ -1108,7 +1114,7 @@ app.get('/', (req, res) => {
   res.send('why ru here');
 });
 
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3002;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
