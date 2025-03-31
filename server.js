@@ -806,77 +806,47 @@ io.on('connection', (socket) => {
         const isHost = room.players[playerIndex].isHost;
         const isDrawer = room.players[playerIndex].id === room.currentDrawer;
         
-        room.players[playerIndex].disconnected = true;
+        room.players.splice(playerIndex, 1);
         
-        setTimeout(() => {
-          if (!rooms.has(user.roomId)) return;
+        if (room.players.length === 0) {
+          clearInterval(room.timer);
+          rooms.delete(user.roomId);
           
-          const room = rooms.get(user.roomId);
-          const playerIndex = room.players.findIndex(p => p.id === socket.id);
-          
-          if (playerIndex !== -1 && room.players[playerIndex].disconnected) {
-            const isHost = room.players[playerIndex].isHost;
-            const isDrawer = room.players[playerIndex].id === room.currentDrawer;
-            
-            room.players.splice(playerIndex, 1);
-            
-            if (room.players.length === 0) {
-              if (room.status === 'waiting') {
-                clearInterval(room.timer);
-                rooms.delete(user.roomId);
-                
-                if (room.isPublic) {
-                  removePublicRoom(user.roomId);
-                }
-                
-                console.log(`Room deleted: ${user.roomId}`);
-              }
-            } else {
-              if (isHost) {
-                room.players[0].isHost = true;
-                room.hostId = room.players[0].id;
-              }
-              
-              updatePublicRoomInfo(user.roomId);
-              
-              io.to(user.roomId).emit('playerLeft', {
-                players: room.players
-              });
-              
-              io.to(user.roomId).emit('chatMessage', {
-                id: uuidv4(),
-                playerId: 'system',
-                username: 'System',
-                message: `${user.username} left the room`,
-                isSystemMessage: true,
-                timestamp: Date.now()
-              });
-              
-              if (isDrawer && room.status !== 'waiting') {
-                clearInterval(room.timer);
-                
-                setTimeout(() => {
-                  startRound(user.roomId);
-                }, 2000);
-              }
-            }
+          if (room.isPublic) {
+            removePublicRoom(user.roomId);
           }
-        }, 2 * 60 * 1000);
-        
-        io.to(user.roomId).emit('playerStatus', {
-          players: room.players
-        });
-        
-        io.to(user.roomId).emit('chatMessage', {
-          id: uuidv4(),
-          playerId: 'system',
-          username: 'System',
-          message: `${user.username} disconnected (waiting 2 minutes for reconnection)`,
-          isSystemMessage: true,
-          timestamp: Date.now()
-        });
+          
+          console.log(`Room deleted: ${user.roomId}`);
+        } else {
+          if (isHost) {
+            room.players[0].isHost = true;
+            room.hostId = room.players[0].id;
+          }
+          
+          updatePublicRoomInfo(user.roomId);
+          
+          io.to(user.roomId).emit('playerLeft', {
+            players: room.players
+          });
+          
+          io.to(user.roomId).emit('chatMessage', {
+            id: uuidv4(),
+            playerId: 'system',
+            username: 'System',
+            message: `${user.username} disconnected`,
+            isSystemMessage: true,
+            timestamp: Date.now()
+          });
+          
+          if (isDrawer && room.status !== 'waiting') {
+            clearInterval(room.timer);
+            
+            setTimeout(() => {
+              startRound(user.roomId);
+            }, 2000);
+          }
+        }
       }
-      
     } catch (error) {
       console.error('Error handling disconnect:', error);
     }
@@ -958,13 +928,29 @@ io.on('connection', (socket) => {
       
       const room = rooms.get(roomId);
       
-      const playerIndex = room.players.findIndex(p => 
-        p.username === username && p.disconnected === true
+      const wasInRoom = Array.from(disconnectedUsers.values()).some(
+        user => user.roomId === roomId && user.username === username
       );
       
-      if (playerIndex !== -1) {
-        room.players[playerIndex].id = socket.id;
-        room.players[playerIndex].disconnected = false;
+      const existingPlayerIndex = room.players.findIndex(p => p.username === username);
+      
+      if (wasInRoom) {
+        room.players.push({
+          id: socket.id,
+          username,
+          score: 0,
+          avatar,
+          isHost: room.players.length === 0,
+          isDrawing: false,
+          hasGuessedCorrectly: false
+        });
+        
+        for (const [address, user] of disconnectedUsers.entries()) {
+          if (user.roomId === roomId && user.username === username) {
+            disconnectedUsers.delete(address);
+            break;
+          }
+        }
         
         users.set(socket.id, { 
           username, 
@@ -977,7 +963,7 @@ io.on('connection', (socket) => {
         
         updatePublicRoomInfo(roomId);
         
-        io.to(roomId).emit('playerStatus', { 
+        io.to(roomId).emit('playerJoined', { 
           players: room.players
         });
         
@@ -985,7 +971,7 @@ io.on('connection', (socket) => {
           id: uuidv4(),
           playerId: 'system',
           username: 'System',
-          message: `${username} reconnected`,
+          message: `${username} rejoined the room`,
           isSystemMessage: true,
           timestamp: Date.now()
         });
@@ -1008,100 +994,51 @@ io.on('connection', (socket) => {
           socket.emit('drawingBatch', room.drawingHistory);
         }
         
-        console.log(`${username} reconnected to room: ${roomId}`);
+        console.log(`${username} rejoined room: ${roomId}`);
+      } else if (existingPlayerIndex !== -1) {
+        socket.emit('errorMessage', 'A player with this username is already in the room');
+        return;
       } else {
-        const existingPlayerIndex = room.players.findIndex(p => p.username === username);
+        room.players.push({
+          id: socket.id,
+          username,
+          score: 0,
+          avatar,
+          isHost: false,
+          isDrawing: false,
+          hasGuessedCorrectly: false
+        });
         
-        if (existingPlayerIndex !== -1) {
-          room.players[existingPlayerIndex].id = socket.id;
-          room.players[existingPlayerIndex].disconnected = false;
-          
-          if (room.currentDrawer === room.players[existingPlayerIndex].id) {
-            room.currentDrawer = socket.id;
-          }
-          
-          users.set(socket.id, {
-            username,
-            roomId,
-            avatar,
-            address: socket.handshake.address
-          });
-          
-          socket.join(roomId);
-          
-          io.to(roomId).emit('playerStatus', {
-            players: room.players
-          });
-          
-          io.to(roomId).emit('chatMessage', {
-            id: uuidv4(),
-            playerId: 'system',
-            username: 'System',
-            message: `${username} reconnected`,
-            isSystemMessage: true,
-            timestamp: Date.now()
-          });
-          
-          socket.emit('rejoinedRoom', {
-            roomId,
-            players: room.players,
-            gameState: room.status,
-            round: room.round,
-            totalRounds: room.totalRounds,
-            currentDrawer: room.currentDrawer,
-            timeLeft: room.timeLeft,
-            chatMessages: room.chatHistory || [],
-            word: room.currentDrawer === socket.id ? room.word : room.word?.replace(/[a-zA-Z]/g, '_')
-          });
-          
-          socket.emit('canvasCleared');
-          
-          if (room.drawingHistory && room.drawingHistory.length > 0) {
-            socket.emit('drawingBatch', room.drawingHistory);
-          }
-          
-          console.log(`${username} reconnected to room: ${roomId}`);
-        } else {
-          room.players.push({
-            id: socket.id,
-            username,
-            score: 0,
-            avatar,
-            isHost: false,
-            isDrawing: false,
-            hasGuessedCorrectly: false
-          });
-          
-          users.set(socket.id, { 
-            username, 
-            roomId,
-            avatar
-          });
-          
-          socket.join(roomId);
-          
-          updatePublicRoomInfo(roomId);
-          
-          io.to(roomId).emit('playerJoined', { 
-            players: room.players
-          });
-          
-          socket.emit('joinedRoom', { 
-            roomId,
-            players: room.players
-          });
-          
-          io.to(roomId).emit('chatMessage', {
-            id: uuidv4(),
-            playerId: 'system',
-            username: 'System',
-            message: `${username} joined the room`,
-            isSystemMessage: true,
-            timestamp: Date.now()
-          });
-          
-          console.log(`${username} joined room as new player: ${roomId}`);
-        }
+        users.set(socket.id, { 
+          username, 
+          roomId,
+          avatar,
+          address: socket.handshake.address
+        });
+        
+        socket.join(roomId);
+        
+        updatePublicRoomInfo(roomId);
+        
+        io.to(roomId).emit('playerJoined', { 
+          players: room.players
+        });
+        
+        socket.emit('joinedRoom', { 
+          roomId,
+          players: room.players
+        });
+        
+        io.to(roomId).emit('chatMessage', {
+          id: uuidv4(),
+          playerId: 'system',
+          username: 'System',
+          message: `${username} joined the room`,
+          isSystemMessage: true,
+          timestamp: Date.now()
+        });
+        
+        console.log(`${username} joined room as new player: ${roomId}`);
       }
     } catch (error) {
       console.error('Error rejoining room:', error);
@@ -1114,7 +1051,7 @@ app.get('/', (req, res) => {
   res.send('why ru here');
 });
 
-const PORT = process.env.PORT || 3002;
+const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
