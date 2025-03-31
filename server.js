@@ -68,7 +68,8 @@ function createRoomState(isPublic = false, hostId, hostUsername, hostAvatar) {
     customWords: [],
     timer: null,
     drawingHistory: [],
-    chatHistory: []
+    chatHistory: [],
+    hintsRevealed: null
   };
   
   const hostPlayer = {
@@ -127,6 +128,13 @@ function startGameTimer(roomId) {
   
   clearInterval(room.timer);
   
+  if (room.status === 'playing' && !room.hintsRevealed) {
+    room.hintsRevealed = {
+      count: 0,
+      positions: []
+    };
+  }
+  
   room.timer = setInterval(() => {
     const room = rooms.get(roomId);
     if (!room) {
@@ -137,6 +145,19 @@ function startGameTimer(roomId) {
     room.timeLeft -= 1;
     
     io.to(roomId).emit('timeUpdate', { timeLeft: room.timeLeft });
+    
+    if (room.status === 'playing' && room.word && room.hintsRevealed) {
+      const totalTime = room.drawTime + 10;
+      const hintIntervals = Math.floor(totalTime / 3);
+      
+      if (room.timeLeft === Math.floor(totalTime - hintIntervals) && room.hintsRevealed.count === 0) {
+        revealHint(roomId, 1);
+      }
+      
+      if (room.timeLeft === Math.floor(totalTime - 2 * hintIntervals) && room.hintsRevealed.count === 1) {
+        revealHint(roomId, 2);
+      }
+    }
     
     if (room.timeLeft <= 0) {
       clearInterval(room.timer);
@@ -151,11 +172,59 @@ function startGameTimer(roomId) {
   }, 1000);
 }
 
+function revealHint(roomId, hintNumber) {
+  const room = rooms.get(roomId);
+  if (!room || !room.word || room.status !== 'playing') return;
+  
+  const word = room.word;
+  const wordLength = word.length;
+  
+  let availablePositions = [];
+  for (let i = 0; i < wordLength; i++) {
+    if (word[i] !== ' ' && !room.hintsRevealed.positions.includes(i)) {
+      availablePositions.push(i);
+    }
+  }
+  
+  availablePositions = availablePositions.sort(() => 0.5 - Math.random());
+  
+  const toReveal = hintNumber === 1 
+    ? Math.max(1, Math.floor(availablePositions.length * 0.25)) 
+    : Math.max(1, Math.floor(availablePositions.length * 0.5));
+  
+  const newRevealedPositions = availablePositions.slice(0, toReveal);
+  
+  room.hintsRevealed.positions = [...room.hintsRevealed.positions, ...newRevealedPositions];
+  room.hintsRevealed.count = hintNumber;
+  
+  const maskedWord = generateMaskedWordWithHints(room.word, room.hintsRevealed.positions);
+  
+  room.players.forEach(player => {
+    if (!player.hasGuessedCorrectly && player.id !== room.currentDrawer) {
+      io.to(player.id).emit('wordHint', { 
+        hint: maskedWord,
+        hintNumber
+      });
+    }
+  });
+  
+  console.log(`Hint ${hintNumber} revealed for word "${room.word}" in room ${roomId}: ${maskedWord}`);
+}
+
+function generateMaskedWordWithHints(word, revealedPositions) {
+  return word.split('').map((char, index) => {
+    if (char === ' ') return ' ';
+    if (revealedPositions.includes(index)) return char;
+    return '_';
+  }).join('');
+}
+
 function startRound(roomId) {
   const room = rooms.get(roomId);
   if (!room) return;
   
   io.to(roomId).emit('canvasCleared');
+  console.log(`Clearing canvas for all players in room ${roomId}`);
   
   if (room.status === 'roundEnd' || room.status === 'waiting') {
     room.round += 1;
@@ -225,18 +294,28 @@ function handleWordSelection(room, selectedWord) {
   
   console.log(`Word selected: ${selectedWord} by ${drawerPlayer.username}`);
   
+  io.to(room.id).emit('canvasCleared');
+  
   room.word = selectedWord;
   room.status = 'playing';
-  room.timeLeft = room.drawTime;
+  
+  room.hintsRevealed = {
+    count: 0,
+    positions: []
+  };
+  
+  room.timeLeft = room.drawTime + 10;
   
   room.drawingHistory = [];
+  
+  const hiddenWord = selectedWord.split('').map(char => char === ' ' ? ' ' : '_').join('');
   
   io.to(room.id).emit('roundStarted', {
     gameState: 'playing',
     drawer: room.currentDrawer,
     drawerName: drawerPlayer.username,
     timeLeft: room.timeLeft,
-    word: selectedWord.replace(/[a-zA-Z]/g, '_')
+    word: hiddenWord
   });
   
   io.to(room.currentDrawer).emit('roundStarted', {
@@ -917,6 +996,8 @@ io.on('connection', (socket) => {
           word: room.currentDrawer === socket.id ? room.word : room.word?.replace(/[a-zA-Z]/g, '_')
         });
         
+        socket.emit('canvasCleared');
+        
         if (room.drawingHistory && room.drawingHistory.length > 0) {
           socket.emit('drawingBatch', room.drawingHistory);
         }
@@ -966,6 +1047,8 @@ io.on('connection', (socket) => {
             chatMessages: room.chatHistory || [],
             word: room.currentDrawer === socket.id ? room.word : room.word?.replace(/[a-zA-Z]/g, '_')
           });
+          
+          socket.emit('canvasCleared');
           
           if (room.drawingHistory && room.drawingHistory.length > 0) {
             socket.emit('drawingBatch', room.drawingHistory);
