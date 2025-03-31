@@ -454,9 +454,12 @@ function endGame(roomId) {
   updatePublicRoomInfo(roomId);
 }
 
+// Room cleanup interval (2 minutes)
+const ROOM_CLEANUP_INTERVAL = 2 * 60 * 1000;
+
 io.on('connection', (socket) => {
-  console.log(`User connected: ${socket.id} from IP: ${socket.handshake.address} via ${socket.conn.transport.name}`);
-  
+  console.log('User connected:', socket.id);
+
   socket.conn.on('packet', (packet) => {
     if (packet.type === 'ping' || packet.type === 'pong') return;
     console.log(`Socket ${socket.id} received packet: ${packet.type}`);
@@ -470,102 +473,158 @@ io.on('connection', (socket) => {
     console.error(`Socket ${socket.id} connection error:`, err);
   });
   
-  socket.on('createRoom', ({ username, isPublic = false, avatar = 0 }) => {
+  socket.on('createRoom', ({ isPublic, username, avatar }) => {
     try {
-      console.log(`Creating ${isPublic ? 'public' : 'private'} room for ${username} (${socket.id})`);
+      if (!username) {
+        throw new Error('Username is required');
+      }
+
+      // Generate a unique room ID
+      const roomId = generateRoomId();
       
-      // Clear any previous reconnect status for this user
-      disconnectedUsers.delete(socket.handshake.address);
+      // Create a new room
+      rooms[roomId] = {
+        id: roomId,
+        isPublic,
+        players: [],
+        gameState: 'waiting',
+        currentDrawer: null,
+        word: '',
+        wordOptions: [],
+        timeLeft: 0,
+        round: 1,
+        totalRounds: 3,
+        drawHistory: [],
+        currentHint: '',
+        hintNumber: 0,
+        isGameOver: false,
+        winners: []
+      };
+
+      // Add the creator as the first player and host
+      const player = {
+        id: socket.id,
+        username: username,
+        score: 0,
+        isHost: true,
+        isDrawing: false,
+        hasGuessedCorrectly: false,
+        avatar: avatar || Math.floor(Math.random() * 10),
+        disconnected: false,
+        hasBeenDrawer: false
+      };
+
+      rooms[roomId].players.push(player);
       
-      const room = createRoomState(isPublic, socket.id, username, avatar);
+      // Store the room ID and username in the socket for later use
+      socket.roomId = roomId;
+      socket.username = username;
       
-      console.log(`Room ${room.id} created with host ID: ${room.hostId}`);
-      console.log(`Players in room: `, room.players);
+      // Join the socket to the room
+      socket.join(roomId);
       
-      users.set(socket.id, { 
-        username, 
-        roomId: room.id,
-        avatar,
-        address: socket.handshake.address
-      });
-      
-      socket.join(room.id);
-      
+      // Send room created confirmation
       socket.emit('roomCreated', { 
-        roomId: room.id
+        roomId,
+        isPublic 
       });
-      
-      console.log(`Room created: ${room.id} by ${username}`);
+
+      // Broadcast initial game state
+      io.to(roomId).emit('gameState', {
+        state: 'waiting',
+        players: rooms[roomId].players,
+        currentDrawer: null,
+        word: '',
+        wordOptions: [],
+        timeLeft: 0,
+        round: 1,
+        totalRounds: 3,
+        currentHint: '',
+        hintNumber: 0,
+        isGameOver: false,
+        winners: []
+      });
+
+      console.log(`Room created: ${roomId}, Public: ${isPublic}, Host: ${username}`);
     } catch (error) {
       console.error('Error creating room:', error);
-      socket.emit('errorMessage', 'Failed to create room');
+      socket.emit('error', { message: error.message || 'Failed to create room' });
     }
   });
   
-  socket.on('joinRoom', ({ roomId, username, avatar = 0 }) => {
+  socket.on('joinRoom', ({ roomId, username, avatar }) => {
     try {
-      if (!rooms.has(roomId)) {
-        socket.emit('errorMessage', 'Room not found');
-        return;
+      if (!username) {
+        throw new Error('Username is required');
       }
-      
-      const room = rooms.get(roomId);
-      
-      if (room.players.length >= room.maxPlayers) {
-        socket.emit('errorMessage', 'Room is full');
-        return;
+
+      if (!roomId || !rooms[roomId]) {
+        throw new Error('Room not found or expired');
       }
-      
-      if (room.status !== 'waiting' && room.gameMode !== 'Normal') {
-        socket.emit('errorMessage', 'Game in progress, cannot join');
-        return;
+
+      const room = rooms[roomId];
+
+      // Check if the room is full
+      const activePlayers = room.players.filter(p => !p.disconnected);
+      if (activePlayers.length >= 12) {
+        throw new Error('Room is full');
       }
-      
-      // Clear any previous reconnect status for this user
-      disconnectedUsers.delete(socket.handshake.address);
-      
-      room.players.push({
+
+      // Check if username is already taken in the room
+      if (room.players.some(p => p.username === username && !p.disconnected)) {
+        throw new Error('Username is already taken');
+      }
+
+      // Add the player to the room
+      const player = {
         id: socket.id,
-        username,
+        username: username,
         score: 0,
-        avatar,
         isHost: false,
         isDrawing: false,
-        hasGuessedCorrectly: false
-      });
-      
-      users.set(socket.id, { 
-        username, 
-        roomId,
-        avatar
-      });
-      
+        hasGuessedCorrectly: false,
+        avatar: avatar || Math.floor(Math.random() * 10),
+        disconnected: false,
+        hasBeenDrawer: false
+      };
+
+      room.players.push(player);
+
+      // Store the room ID and username in the socket for later use
+      socket.roomId = roomId;
+      socket.username = username;
+
+      // Join the socket to the room
       socket.join(roomId);
-      
-      updatePublicRoomInfo(roomId);
-      
-      io.to(roomId).emit('playerJoined', { 
-        players: room.players
+
+      // Broadcast updated game state
+      io.to(roomId).emit('gameState', {
+        state: room.gameState,
+        players: room.players,
+        currentDrawer: room.currentDrawer,
+        word: room.word,
+        wordOptions: room.wordOptions,
+        timeLeft: room.timeLeft,
+        round: room.round,
+        totalRounds: room.totalRounds,
+        currentHint: room.currentHint,
+        hintNumber: room.hintNumber,
+        isGameOver: room.isGameOver,
+        winners: room.winners
       });
-      
-      socket.emit('joinedRoom', { 
-        roomId,
-        players: room.players
-      });
-      
+
+      // Send system message about new player
       io.to(roomId).emit('chatMessage', {
-        id: uuidv4(),
-        playerId: 'system',
+        id: generateId(),
         username: 'System',
         message: `${username} joined the room`,
-        isSystemMessage: true,
-        timestamp: Date.now()
+        isSystemMessage: true
       });
-      
-      console.log(`${username} joined room: ${roomId}`);
+
+      console.log(`Player ${username} joined room: ${roomId}`);
     } catch (error) {
       console.error('Error joining room:', error);
-      socket.emit('errorMessage', 'Failed to join room');
+      socket.emit('error', { message: error.message || 'Failed to join room' });
     }
   });
   
@@ -679,6 +738,7 @@ io.on('connection', (socket) => {
         room.chatHistory = [];
       }
       
+      // If the player is drawing, they can send normal messages to everyone
       if (player.isDrawing) {
         const chatMessage = {
           id: uuidv4(),
@@ -871,121 +931,59 @@ io.on('connection', (socket) => {
     }
   });
   
-  socket.on('disconnect', (reason) => {
+  socket.on('disconnect', () => {
     try {
-      console.log(`User disconnected: ${socket.id}, reason: ${reason}`);
-      
-      const user = users.get(socket.id);
-      if (!user) return;
-      
-      if (user.roomId) {
-        console.log(`User ${user.username} (${socket.id}) was in room ${user.roomId} before disconnect`);
-      }
-      
-      const room = rooms.get(user.roomId);
-      if (!room) return;
-      
+      const roomId = socket.roomId;
+      if (!roomId || !rooms[roomId]) return;
+
+      console.log(`User disconnected: ${socket.id} from room: ${roomId}`);
+
+      const room = rooms[roomId];
       const playerIndex = room.players.findIndex(p => p.id === socket.id);
-      
+
       if (playerIndex !== -1) {
-        const isHost = room.players[playerIndex].isHost;
-        const isDrawer = room.players[playerIndex].id === room.currentDrawer;
-        
+        // Mark the player as disconnected
         room.players[playerIndex].disconnected = true;
-        
-        console.log(`Marked player ${user.username} as disconnected in room ${user.roomId}`);
-        
-        if (user.address) {
-          disconnectedUsers.set(user.address, {
-            roomId: user.roomId,
-            username: user.username,
-            avatar: user.avatar,
-            timestamp: Date.now(),
-            playerId: socket.id // Store the original player ID
-          });
-          
-          console.log(`Added ${user.username} to disconnectedUsers map with address ${user.address}`);
-          
-          setTimeout(() => {
-            if (disconnectedUsers.has(user.address)) {
-              disconnectedUsers.delete(user.address);
-              console.log(`Cleaned up disconnected user: ${user.username} (timeout expired)`);
-              
-              if (rooms.has(user.roomId)) {
-                const room = rooms.get(user.roomId);
-                const playerIndex = room.players.findIndex(p => 
-                  p.username === user.username && p.disconnected === true
-                );
-                
-                if (playerIndex !== -1) {
-                  const isHost = room.players[playerIndex].isHost;
-                  const isDrawer = room.players[playerIndex].id === room.currentDrawer;
-                  
-                  room.players.splice(playerIndex, 1);
-                  console.log(`Removed disconnected player ${user.username} after timeout`);
-                  
-                  if (room.players.length === 0) {
-                    clearInterval(room.timer);
-                    rooms.delete(user.roomId);
-                    
-                    if (room.isPublic) {
-                      removePublicRoom(user.roomId);
-                    }
-                    
-                    console.log(`Room deleted: ${user.roomId} (all players disconnected)`);
-                  }
-                  else if (isHost && room.players.length > 0) {
-                    room.players[0].isHost = true;
-                    room.hostId = room.players[0].id;
-                    console.log(`New host assigned: ${room.players[0].username}`);
-                  }
-                  
-                  io.to(user.roomId).emit('playerLeft', {
-                    players: room.players
-                  });
-                  
-                  io.to(user.roomId).emit('chatMessage', {
-                    id: uuidv4(),
-                    playerId: 'system',
-                    username: 'System',
-                    message: `${user.username} has been removed (disconnected for too long)`,
-                    isSystemMessage: true,
-                    timestamp: Date.now()
-                  });
-                  
-                  if (isDrawer && room.status !== 'waiting') {
-                    clearInterval(room.timer);
-                    
-                    io.to(user.roomId).emit('chatMessage', {
-                      id: uuidv4(),
-                      playerId: 'system',
-                      username: 'System',
-                      message: `The drawer disconnected. Starting a new round...`,
-                      isSystemMessage: true,
-                      timestamp: Date.now()
-                    });
-                    
-                    setTimeout(() => {
-                      startRound(user.roomId);
-                    }, 2000);
-                  }
-                }
-              }
-            }
-          }, 2 * 60 * 1000);
+
+        // If the disconnected player was the drawer, end the round
+        if (room.currentDrawer === socket.id && room.gameState === 'playing') {
+          endRound(roomId);
         }
-        
-        io.to(user.roomId).emit('playerStatus', {
-          players: room.players
-        });
-        
-        io.to(user.roomId).emit('chatMessage', {
-          id: uuidv4(),
-          playerId: 'system',
-          username: 'System',
-          message: `${user.username} disconnected (waiting for reconnection)`,
-          isSystemMessage: true,
-          timestamp: Date.now()
+
+        // If all players are disconnected, schedule room for cleanup
+        const connectedPlayers = room.players.filter(p => !p.disconnected);
+        if (connectedPlayers.length === 0) {
+          console.log(`Scheduling cleanup for empty room: ${roomId}`);
+          setTimeout(() => {
+            if (rooms[roomId] && rooms[roomId].players.every(p => p.disconnected)) {
+              console.log(`Cleaning up empty room: ${roomId}`);
+              delete rooms[roomId];
+            }
+          }, ROOM_CLEANUP_INTERVAL);
+        }
+
+        // If the host disconnected, assign a new host
+        if (room.players[playerIndex].isHost) {
+          const newHost = room.players.find(p => !p.disconnected);
+          if (newHost) {
+            newHost.isHost = true;
+          }
+        }
+
+        // Broadcast updated game state
+        io.to(roomId).emit('gameState', {
+          state: room.gameState,
+          players: room.players,
+          currentDrawer: room.currentDrawer,
+          word: room.word,
+          wordOptions: room.wordOptions,
+          timeLeft: room.timeLeft,
+          round: room.round,
+          totalRounds: room.totalRounds,
+          currentHint: room.currentHint,
+          hintNumber: room.hintNumber,
+          isGameOver: room.isGameOver,
+          winners: room.winners
         });
       }
     } catch (error) {
