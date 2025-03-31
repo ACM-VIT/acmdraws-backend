@@ -596,14 +596,13 @@ io.on('connection', (socket) => {
         throw new Error('Room is full');
       }
 
-      // Check if username is already taken by an active player
       const existingPlayer = room.players.find(p => 
         p.username === username && !p.disconnected
       );
 
-      if (existingPlayer) {
-        throw new Error('Username is already taken');
-      }
+      // if (existingPlayer) {
+      //   throw new Error('Username is already taken');
+      // }
 
       // Check if this player was previously in the room but disconnected
       const disconnectedPlayerIndex = room.players.findIndex(p => 
