@@ -17,7 +17,12 @@ const io = new Server(server, {
   pingTimeout: 60000,
   pingInterval: 25000,
   connectTimeout: 30000,
-  maxHttpBufferSize: 5e6
+  maxHttpBufferSize: 5e6,
+  transports: ['websocket', 'polling'],
+  allowUpgrades: true,
+  perMessageDeflate: {
+    threshold: 32768
+  }
 });
 
 const rooms = new Map();
@@ -450,28 +455,20 @@ function endGame(roomId) {
 }
 
 io.on('connection', (socket) => {
-  console.log(`User connected: ${socket.id}`);
+  console.log(`User connected: ${socket.id} from IP: ${socket.handshake.address} via ${socket.conn.transport.name}`);
   
-  // Disable automatic reconnection for now - let client decide if they want to reconnect
-  // Will be handled by explicit rejoinRoom calls instead
-  /*
-  const reconnectUser = async () => {
-    const previousSession = disconnectedUsers.get(socket.handshake.address);
-    if (previousSession) {
-      const { roomId, username, avatar } = previousSession;
-      
-      if (rooms.has(roomId)) {
-        socket.emit('rejoinPrompt', { roomId, username });
-        
-        disconnectedUsers.delete(socket.handshake.address);
-        return true;
-      }
-    }
-    return false;
-  };
+  socket.conn.on('packet', (packet) => {
+    if (packet.type === 'ping' || packet.type === 'pong') return;
+    console.log(`Socket ${socket.id} received packet: ${packet.type}`);
+  });
   
-  reconnectUser();
-  */
+  socket.conn.on('upgrade', (transport) => {
+    console.log(`Socket ${socket.id} transport upgraded to: ${transport.name}`);
+  });
+  
+  socket.conn.on('error', (err) => {
+    console.error(`Socket ${socket.id} connection error:`, err);
+  });
   
   socket.on('createRoom', ({ username, isPublic = false, avatar = 0 }) => {
     try {
@@ -874,31 +871,19 @@ io.on('connection', (socket) => {
     }
   });
   
-  socket.on('disconnect', () => {
+  socket.on('disconnect', (reason) => {
     try {
-      console.log(`User disconnected: ${socket.id}`);
+      console.log(`User disconnected: ${socket.id}, reason: ${reason}`);
       
       const user = users.get(socket.id);
       if (!user) return;
       
+      if (user.roomId) {
+        console.log(`User ${user.username} (${socket.id}) was in room ${user.roomId} before disconnect`);
+      }
+      
       const room = rooms.get(user.roomId);
       if (!room) return;
-      
-      if (user.address) {
-        disconnectedUsers.set(user.address, {
-          roomId: user.roomId,
-          username: user.username,
-          avatar: user.avatar,
-          timestamp: Date.now()
-        });
-        
-        setTimeout(() => {
-          if (disconnectedUsers.has(user.address)) {
-            disconnectedUsers.delete(user.address);
-            console.log(`Cleaned up disconnected user: ${user.username} (timeout expired)`);
-          }
-        }, 2 * 60 * 1000);
-      }
       
       const playerIndex = room.players.findIndex(p => p.id === socket.id);
       
@@ -906,31 +891,91 @@ io.on('connection', (socket) => {
         const isHost = room.players[playerIndex].isHost;
         const isDrawer = room.players[playerIndex].id === room.currentDrawer;
         
-        // Remove the player immediately from UI - SkribblGame will handle UI updates
-        room.players.splice(playerIndex, 1);
+        room.players[playerIndex].disconnected = true;
         
-        // If everyone left, delete the room immediately
-        if (room.players.length === 0) {
-          clearInterval(room.timer);
-          rooms.delete(user.roomId);
+        console.log(`Marked player ${user.username} as disconnected in room ${user.roomId}`);
+        
+        if (user.address) {
+          disconnectedUsers.set(user.address, {
+            roomId: user.roomId,
+            username: user.username,
+            avatar: user.avatar,
+            timestamp: Date.now(),
+            playerId: socket.id // Store the original player ID
+          });
           
-          if (room.isPublic) {
-            removePublicRoom(user.roomId);
-          }
+          console.log(`Added ${user.username} to disconnectedUsers map with address ${user.address}`);
           
-          console.log(`Room deleted: ${user.roomId} (all players disconnected)`);
-          return;
+          setTimeout(() => {
+            if (disconnectedUsers.has(user.address)) {
+              disconnectedUsers.delete(user.address);
+              console.log(`Cleaned up disconnected user: ${user.username} (timeout expired)`);
+              
+              if (rooms.has(user.roomId)) {
+                const room = rooms.get(user.roomId);
+                const playerIndex = room.players.findIndex(p => 
+                  p.username === user.username && p.disconnected === true
+                );
+                
+                if (playerIndex !== -1) {
+                  const isHost = room.players[playerIndex].isHost;
+                  const isDrawer = room.players[playerIndex].id === room.currentDrawer;
+                  
+                  room.players.splice(playerIndex, 1);
+                  console.log(`Removed disconnected player ${user.username} after timeout`);
+                  
+                  if (room.players.length === 0) {
+                    clearInterval(room.timer);
+                    rooms.delete(user.roomId);
+                    
+                    if (room.isPublic) {
+                      removePublicRoom(user.roomId);
+                    }
+                    
+                    console.log(`Room deleted: ${user.roomId} (all players disconnected)`);
+                  }
+                  else if (isHost && room.players.length > 0) {
+                    room.players[0].isHost = true;
+                    room.hostId = room.players[0].id;
+                    console.log(`New host assigned: ${room.players[0].username}`);
+                  }
+                  
+                  io.to(user.roomId).emit('playerLeft', {
+                    players: room.players
+                  });
+                  
+                  io.to(user.roomId).emit('chatMessage', {
+                    id: uuidv4(),
+                    playerId: 'system',
+                    username: 'System',
+                    message: `${user.username} has been removed (disconnected for too long)`,
+                    isSystemMessage: true,
+                    timestamp: Date.now()
+                  });
+                  
+                  if (isDrawer && room.status !== 'waiting') {
+                    clearInterval(room.timer);
+                    
+                    io.to(user.roomId).emit('chatMessage', {
+                      id: uuidv4(),
+                      playerId: 'system',
+                      username: 'System',
+                      message: `The drawer disconnected. Starting a new round...`,
+                      isSystemMessage: true,
+                      timestamp: Date.now()
+                    });
+                    
+                    setTimeout(() => {
+                      startRound(user.roomId);
+                    }, 2000);
+                  }
+                }
+              }
+            }
+          }, 2 * 60 * 1000);
         }
         
-        if (isHost) {
-          room.players[0].isHost = true;
-          room.hostId = room.players[0].id;
-          console.log(`New host assigned after disconnect: ${room.players[0].username}`);
-        }
-        
-        updatePublicRoomInfo(user.roomId);
-        
-        io.to(user.roomId).emit('playerLeft', {
+        io.to(user.roomId).emit('playerStatus', {
           players: room.players
         });
         
@@ -938,33 +983,11 @@ io.on('connection', (socket) => {
           id: uuidv4(),
           playerId: 'system',
           username: 'System',
-          message: `${user.username} disconnected`,
+          message: `${user.username} disconnected (waiting for reconnection)`,
           isSystemMessage: true,
           timestamp: Date.now()
         });
-        
-        // If the drawer disconnected, start a new round
-        if (isDrawer && room.status !== 'waiting') {
-          clearInterval(room.timer);
-          
-          io.to(user.roomId).emit('chatMessage', {
-            id: uuidv4(),
-            playerId: 'system',
-            username: 'System',
-            message: `The drawer disconnected. Starting a new round...`,
-            isSystemMessage: true,
-            timestamp: Date.now()
-          });
-          
-          setTimeout(() => {
-            startRound(user.roomId);
-          }, 2000);
-        }
       }
-      
-      users.delete(socket.id);
-      console.log(`Removed user ${user.username} from users map`);
-      
     } catch (error) {
       console.error('Error handling disconnect:', error);
     }
