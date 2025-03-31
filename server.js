@@ -601,9 +601,9 @@ io.on('connection', (socket) => {
         p.username === username && !p.disconnected
       );
 
-      if (existingPlayer) {
-        throw new Error('Username is already taken');
-      }
+      // if (existingPlayer) {
+      //   throw new Error('Username is already taken');
+      // }
 
       // Check if this player was previously in the room but disconnected
       const disconnectedPlayerIndex = room.players.findIndex(p => 
