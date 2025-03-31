@@ -7,10 +7,12 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 app.use(cors());
 
+// Helper function to generate a unique room ID
 function generateRoomId() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
+// Helper function to generate a unique message ID
 function generateId() {
   return uuidv4();
 }
@@ -18,7 +20,7 @@ function generateId() {
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: 'http://localhost:3000,https://enrollments-25.vercel.app',
+    origin: '*',
     methods: ['GET', 'POST']
   },
   path: '/skribbl',
@@ -588,43 +590,93 @@ io.on('connection', (socket) => {
         throw new Error('Room not found or expired');
       }
 
-      // Check if the room is full
+      // Check if the room is full (excluding disconnected players)
       const activePlayers = room.players.filter(p => !p.disconnected);
       if (activePlayers.length >= 12) {
         throw new Error('Room is full');
       }
 
-      // Check if username is already taken in the room
-      if (room.players.some(p => p.username === username && !p.disconnected)) {
+      // Check if username is already taken by an active player
+      const existingPlayer = room.players.find(p => 
+        p.username === username && !p.disconnected
+      );
+
+      if (existingPlayer) {
         throw new Error('Username is already taken');
       }
 
-      // Add the player to the room
-      const player = {
-        id: socket.id,
-        username: username,
-        score: 0,
-        isHost: false,
-        isDrawing: false,
-        hasGuessedCorrectly: false,
-        avatar: avatar || Math.floor(Math.random() * 10),
-        disconnected: false,
-        hasBeenDrawer: false
-      };
+      // Check if this player was previously in the room but disconnected
+      const disconnectedPlayerIndex = room.players.findIndex(p => 
+        p.username === username && p.disconnected
+      );
 
-      room.players.push(player);
+      if (disconnectedPlayerIndex !== -1) {
+        // Reconnect the player
+        const player = room.players[disconnectedPlayerIndex];
+        player.id = socket.id;
+        player.disconnected = false;
+        player.avatar = avatar || player.avatar;
 
-      // Store the room ID and username in the socket and users map
-      socket.roomId = roomId;
-      socket.username = username;
-      users.set(socket.id, {
-        username,
-        roomId,
-        avatar
-      });
+        // Store user info
+        users.set(socket.id, {
+          username,
+          roomId,
+          avatar: player.avatar
+        });
 
-      // Join the socket to the room
-      socket.join(roomId);
+        // Join the socket to the room
+        socket.join(roomId);
+
+        // If this was the drawer before disconnecting, restore their status
+        if (room.currentDrawerName === username) {
+          room.currentDrawer = socket.id;
+        }
+
+        // Send reconnection message
+        io.to(roomId).emit('chatMessage', {
+          id: generateId(),
+          username: 'System',
+          message: `${username} reconnected`,
+          isSystemMessage: true
+        });
+
+        console.log(`Player ${username} reconnected to room: ${roomId}`);
+      } else {
+        // Add as a new player
+        const player = {
+          id: socket.id,
+          username: username,
+          score: 0,
+          isHost: false,
+          isDrawing: false,
+          hasGuessedCorrectly: false,
+          avatar: avatar || Math.floor(Math.random() * 10),
+          disconnected: false,
+          hasBeenDrawer: false
+        };
+
+        room.players.push(player);
+
+        // Store user info
+        users.set(socket.id, {
+          username,
+          roomId,
+          avatar: player.avatar
+        });
+
+        // Join the socket to the room
+        socket.join(roomId);
+
+        // Send welcome message
+        io.to(roomId).emit('chatMessage', {
+          id: generateId(),
+          username: 'System',
+          message: `${username} joined the room`,
+          isSystemMessage: true
+        });
+
+        console.log(`Player ${username} joined room: ${roomId}`);
+      }
 
       // Update public rooms if necessary
       if (room.isPublic) {
@@ -647,15 +699,6 @@ io.on('connection', (socket) => {
         winners: room.winners
       });
 
-      // Send system message about new player
-      io.to(roomId).emit('chatMessage', {
-        id: generateId(),
-        username: 'System',
-        message: `${username} joined the room`,
-        isSystemMessage: true
-      });
-
-      console.log(`Player ${username} joined room: ${roomId}`);
     } catch (error) {
       console.error('Error joining room:', error);
       socket.emit('error', { message: error.message || 'Failed to join room' });
