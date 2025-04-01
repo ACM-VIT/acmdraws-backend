@@ -40,8 +40,11 @@ try {
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: '*',
-    methods: ['GET', 'POST']
+    origin: process.env.NODE_ENV === 'production' 
+      ? ['https://skribbl.acm.today', 'https://www.skribbl.acm.today'] 
+      : '*',
+    methods: ['GET', 'POST'],
+    credentials: true
   },
   path: '/skribbl',
   pingTimeout: 60000,
@@ -475,19 +478,42 @@ function endGame(roomId) {
 // Room cleanup interval (2 minutes)
 const ROOM_CLEANUP_INTERVAL = 2 * 60 * 1000;
 
+// Handle initial connection
 io.on('connection', (socket) => {
   console.log(`New client connected: ${socket.id}`);
+
+  // Add connection error handling
+  socket.on('error', (error) => {
+    console.error(`Socket ${socket.id} error:`, error);
+  });
+
+  socket.on('connect_error', (error) => {
+    console.error(`Socket ${socket.id} connect error:`, error);
+  });
+
+  socket.on('connect_timeout', () => {
+    console.error(`Socket ${socket.id} connect timeout`);
+  });
 
   socket.on('setUsername', (username) => {
     console.log(`Setting username for ${socket.id}: ${username}`);
     if (!username) return;
     
+    // Clean up any existing user data
+    const existingUser = Array.from(users.values()).find(u => u.username === username);
+    if (existingUser) {
+      console.log(`Found existing user with username ${username}, cleaning up...`);
+      users.delete(existingUser.id);
+    }
+    
     users.set(socket.id, {
       username,
       roomId: null,
-      avatar: Math.floor(Math.random() * 10)
+      avatar: Math.floor(Math.random() * 10),
+      connected: true
     });
     
+    // Send initial public rooms list
     socket.emit('publicRooms', getPublicRoomsInfo());
   });
 
@@ -510,71 +536,46 @@ io.on('connection', (socket) => {
         throw new Error('Username is required');
       }
 
-      // Generate a unique room ID
-      const roomId = generateRoomId();
-      
-      // Create a new room
-      const room = {
-        id: roomId,
-        isPublic,
-        players: [],
-        status: 'waiting',
-        currentDrawer: null,
-        word: '',
-        wordOptions: [],
-        timeLeft: 0,
-        round: 1,
-        totalRounds: 3,
-        drawHistory: [],
-        currentHint: '',
-        hintNumber: 0,
-        isGameOver: false,
-        winners: [],
-        timer: null
-      };
+      // Clean up any existing rooms for this user
+      const existingUser = users.get(socket.id);
+      if (existingUser && existingUser.roomId) {
+        console.log(`User ${username} already has room ${existingUser.roomId}, cleaning up...`);
+        const oldRoom = rooms.get(existingUser.roomId);
+        if (oldRoom) {
+          clearInterval(oldRoom.timer);
+          rooms.delete(existingUser.roomId);
+          if (oldRoom.isPublic) {
+            removePublicRoom(existingUser.roomId);
+          }
+        }
+      }
 
-      // Add the creator as the first player and host
-      const player = {
-        id: socket.id,
-        username: username,
-        score: 0,
-        isHost: true,
-        isDrawing: false,
-        hasGuessedCorrectly: false,
-        avatar: avatar || Math.floor(Math.random() * 10),
-        disconnected: false,
-        hasBeenDrawer: false
-      };
-
-      room.players.push(player);
-      
-      // Store the room in the rooms Map
-      rooms.set(roomId, room);
-      
-      // Store the room ID and username in the socket for later use
-      socket.roomId = roomId;
-      socket.username = username;
-      
-      // Store user info
-      users.set(socket.id, {
-        username,
-        roomId,
-        avatar
-      });
+      const roomState = createRoomState(isPublic, socket.id, username, avatar);
       
       // Join the socket to the room
-      socket.join(roomId);
+      socket.join(roomState.id);
+      
+      // Update user info
+      users.set(socket.id, {
+        username,
+        roomId: roomState.id,
+        avatar: avatar || Math.floor(Math.random() * 10),
+        connected: true
+      });
       
       // Send room created confirmation
       socket.emit('roomCreated', { 
-        roomId,
+        roomId: roomState.id,
+        isHost: true,
         isPublic 
       });
 
+      console.log(`Room created: ${roomState.id}, Public: ${isPublic}, Host: ${username}`);
+      
       // Broadcast initial game state
-      io.to(roomId).emit('gameState', {
-        state: 'waiting',
-        players: room.players,
+      io.to(roomState.id).emit('gameState', {
+        status: 'waiting',
+        players: roomState.players,
         currentDrawer: null,
         word: '',
         wordOptions: [],
@@ -587,12 +588,6 @@ io.on('connection', (socket) => {
         winners: []
       });
 
-      // Update public rooms if necessary
-      if (isPublic) {
-        updatePublicRoomInfo(roomId);
-      }
-
-      console.log(`Room created: ${roomId}, Public: ${isPublic}, Host: ${username}`);
     } catch (error) {
       console.error('Error creating room:', error);
       socket.emit('error', { message: error.message || 'Failed to create room' });
@@ -1267,12 +1262,30 @@ io.on('connection', (socket) => {
   });
 });
 
+// Add a health check endpoint
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
 app.get('/', (req, res) => {
-  res.send('why ru here');
+  res.send('Skribbl Game Server Running');
+});
+
+// Add error handling for the server
+server.on('error', (error) => {
+  console.error('Server error:', error);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
 });
 
