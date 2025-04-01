@@ -3,9 +3,12 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(cors());
+app.use(express.static(path.join(__dirname, 'public')));
 
 // Helper function to generate a unique room ID
 function generateRoomId() {
@@ -15,6 +18,23 @@ function generateRoomId() {
 // Helper function to generate a unique message ID
 function generateId() {
   return uuidv4();
+}
+
+let words = [];
+try {
+  const dictionaryPath = path.join(__dirname, 'public', 'dictionary.json');
+  const dictionaryContent = fs.readFileSync(dictionaryPath, 'utf8');
+  words = JSON.parse(dictionaryContent);
+  console.log(`Loaded ${words.length} words from dictionary.json`);
+} catch (error) {
+  console.error('Error loading dictionary.json:', error);
+  // Fallback words in case the file can't be loaded
+  words = [
+    'apple', 'banana', 'orange', 'strawberry', 'grape',
+    'car', 'bus', 'train', 'airplane', 'bicycle',
+    'dog', 'cat', 'elephant', 'tiger', 'lion'
+  ];
+  console.log('Using fallback word list');
 }
 
 const server = http.createServer(app);
@@ -40,19 +60,6 @@ const rooms = new Map();
 const publicRooms = new Map();
 const users = new Map();
 const disconnectedUsers = new Map();
-
-const words = [
-  'apple', 'banana', 'orange', 'strawberry', 'grape',
-  'car', 'bus', 'train', 'airplane', 'bicycle',
-  'dog', 'cat', 'elephant', 'tiger', 'lion',
-  'house', 'building', 'castle', 'apartment', 'hotel',
-  'tree', 'flower', 'mountain', 'river', 'ocean',
-  'computer', 'phone', 'tablet', 'keyboard', 'mouse',
-  'book', 'newspaper', 'magazine', 'letter', 'envelope',
-  'chair', 'table', 'sofa', 'bed', 'lamp',
-  'shirt', 'pants', 'dress', 'shoes', 'hat',
-  'pizza', 'burger', 'pasta', 'sandwich', 'cake'
-];
 
 function getRandomWords(count = 3) {
   const shuffled = [...words].sort(() => 0.5 - Math.random());
@@ -469,7 +476,20 @@ function endGame(roomId) {
 const ROOM_CLEANUP_INTERVAL = 2 * 60 * 1000;
 
 io.on('connection', (socket) => {
-  console.log('User connected:', socket.id);
+  console.log(`New client connected: ${socket.id}`);
+
+  socket.on('setUsername', (username) => {
+    console.log(`Setting username for ${socket.id}: ${username}`);
+    if (!username) return;
+    
+    users.set(socket.id, {
+      username,
+      roomId: null,
+      avatar: Math.floor(Math.random() * 10)
+    });
+    
+    socket.emit('publicRooms', getPublicRoomsInfo());
+  });
 
   socket.conn.on('packet', (packet) => {
     if (packet.type === 'ping' || packet.type === 'pong') return;
