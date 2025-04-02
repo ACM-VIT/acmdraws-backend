@@ -51,11 +51,14 @@ const io = new Server(server, {
   pingInterval: 25000,
   connectTimeout: 30000,
   maxHttpBufferSize: 5e6,
-  transports: ['websocket', 'polling'],
+  transports: ['polling', 'websocket'],
   allowUpgrades: true,
+  upgradeTimeout: 30000,
   perMessageDeflate: {
     threshold: 32768
-  }
+  },
+  allowEIO3: true,
+  rememberUpgrade: true
 });
 
 // Initialize data structures
@@ -475,12 +478,22 @@ function endGame(roomId) {
   updatePublicRoomInfo(roomId);
 }
 
-// Room cleanup interval (2 minutes)
-const ROOM_CLEANUP_INTERVAL = 2 * 60 * 1000;
+// Room cleanup interval (5 minutes)
+const ROOM_CLEANUP_INTERVAL = 5 * 60 * 1000;
 
 // Handle initial connection
 io.on('connection', (socket) => {
   console.log(`New client connected: ${socket.id}`);
+
+  // Check if this is a reconnection
+  const reconnectUser = Array.from(disconnectedUsers.values()).find(
+    user => user.username && socket.handshake.query.username === user.username
+  );
+  
+  if (reconnectUser) {
+    console.log(`Detected reconnection for user: ${reconnectUser.username}`);
+    // Will handle the reconnection when they call setUsername
+  }
 
   // Add connection error handling
   socket.on('error', (error) => {
@@ -499,24 +512,126 @@ io.on('connection', (socket) => {
     console.log(`Setting username for ${socket.id}: ${username}`);
     if (!username) return;
     
-    // Clean up any existing user data
-    const existingUser = Array.from(users.values()).find(u => u.username === username);
-    if (existingUser) {
-      console.log(`Found existing user with username ${username}, cleaning up...`);
-      users.delete(existingUser.id);
+    // Check if this is a reconnection
+    const disconnectedEntry = Array.from(disconnectedUsers.entries()).find(
+      ([oldSocketId, userData]) => userData.username === username
+    );
+    
+    if (disconnectedEntry) {
+      const [oldSocketId, userData] = disconnectedEntry;
+      console.log(`Found disconnected user ${username} (previous socket: ${oldSocketId})`);
+      
+      // Remove from disconnected users
+      disconnectedUsers.delete(oldSocketId);
+      
+      // If they were in a room, handle reconnection
+      if (userData.roomId && rooms.has(userData.roomId)) {
+        const room = rooms.get(userData.roomId);
+        const playerIndex = room.players.findIndex(p => p.username === username);
+        
+        if (playerIndex !== -1) {
+          console.log(`Player ${username} found in room ${userData.roomId}, updating socket ID from ${room.players[playerIndex].id} to ${socket.id}`);
+          
+          // Update the socket ID in the room's player list
+          room.players[playerIndex].id = socket.id;
+          room.players[playerIndex].disconnected = false;
+          
+          // Update room's current drawer if needed
+          if (room.currentDrawerName === username || 
+              (room.currentDrawer && room.currentDrawer === oldSocketId)) {
+            room.currentDrawer = socket.id;
+          }
+          
+          // Join the socket to the room
+          socket.join(userData.roomId);
+          
+          // Store user data
+          users.set(socket.id, {
+            username,
+            roomId: userData.roomId,
+            avatar: userData.avatar,
+            connected: true
+          });
+          
+          // Notify room of reconnection
+          io.to(userData.roomId).emit('playerStatus', {
+            players: room.players
+          });
+          
+          io.to(userData.roomId).emit('chatMessage', {
+            id: generateId(),
+            username: 'System',
+            message: `${username} reconnected`,
+            isSystemMessage: true,
+            timestamp: Date.now()
+          });
+          
+          // Send the current state to the reconnected player
+          socket.emit('rejoinedRoom', {
+            roomId: userData.roomId,
+            players: room.players,
+            gameState: {
+              status: room.status,
+              players: room.players,
+              roundNumber: room.round,
+              maxRounds: room.totalRounds,
+              timeLeft: room.timeLeft,
+              messages: room.chatHistory || [],
+              drawer: room.currentDrawer || "",
+              drawerName: room.currentDrawerName || "",
+              isDrawing: room.currentDrawer === socket.id,
+              round: room.round,
+              totalRounds: room.totalRounds,
+              word: room.currentDrawer === socket.id ? room.word : undefined
+            },
+            word: room.currentDrawer === socket.id ? room.word : undefined,
+            round: room.round,
+            totalRounds: room.totalRounds,
+            currentDrawer: room.currentDrawer,
+            timeLeft: room.timeLeft,
+            chatMessages: room.chatHistory || []
+          });
+          
+          // Send drawing history if available
+          if (room.drawingHistory && room.drawingHistory.length > 0) {
+            socket.emit('drawingBatch', room.drawingHistory);
+          }
+          
+          return;
+        }
+      }
     }
     
+    // Not a reconnection or reconnection failed - handle as new user
+    
+    // Clean up any existing user data with the same username
+    const existingUser = Array.from(users.entries()).find(([sid, u]) => 
+      u.username === username && sid !== socket.id
+    );
+    
+    if (existingUser) {
+      const [oldSocketId, oldUserData] = existingUser;
+      console.log(`Found existing user with username ${username} (socket: ${oldSocketId}), cleaning up...`);
+      
+      // Only clean up if this is actually a different client
+      if (socket.handshake.address !== users.get(oldSocketId).address) {
+        users.delete(oldSocketId);
+      }
+    }
+    
+    // Set up new user data
     users.set(socket.id, {
       username,
       roomId: null,
       avatar: Math.floor(Math.random() * 10),
-      connected: true
+      connected: true,
+      address: socket.handshake.address
     });
     
     // Send initial public rooms list
     socket.emit('publicRooms', getPublicRoomsInfo());
   });
-
+  
   socket.conn.on('packet', (packet) => {
     if (packet.type === 'ping' || packet.type === 'pong') return;
     console.log(`Socket ${socket.id} received packet: ${packet.type}`);
@@ -532,6 +647,8 @@ io.on('connection', (socket) => {
   
   socket.on('createRoom', ({ isPublic, username, avatar }) => {
     try {
+      console.log(`Creating room request from ${username} (${socket.id}), isPublic: ${isPublic}`);
+      
       if (!username) {
         throw new Error('Username is required');
       }
@@ -551,46 +668,66 @@ io.on('connection', (socket) => {
       }
 
       const roomState = createRoomState(isPublic, socket.id, username, avatar);
+      console.log(`Room state created with ID: ${roomState.id}`);
       
-      // Join the socket to the room
-      socket.join(roomState.id);
+      // Ensure the socket is really in the room
+      const currentRooms = socket.rooms || new Set();
+      if (!currentRooms.has(roomState.id)) {
+        console.log(`Explicitly joining socket ${socket.id} to room ${roomState.id}`);
+        socket.join(roomState.id);
+      }
       
       // Update user info
       users.set(socket.id, {
         username,
         roomId: roomState.id,
         avatar: avatar || Math.floor(Math.random() * 10),
-        connected: true
+        connected: true,
+        address: socket.handshake.address
       });
       
-      // Send room created confirmation
-      socket.emit('roomCreated', { 
-        roomId: roomState.id,
-        isHost: true,
-        isPublic 
-      });
+      // Add a delay to avoid race conditions
+      setTimeout(() => {
+        // Check if the socket is still connected
+        if (!socket.connected) {
+          console.log(`Socket ${socket.id} disconnected during room creation, aborting`);
+          return;
+        }
+        
+        // First send room created confirmation
+        console.log(`Emitting roomCreated for roomId: ${roomState.id}`);
+        socket.emit('roomCreated', { 
+          roomId: roomState.id
+        });
+        
+        // Then send joined room confirmation
+        console.log(`Emitting joinedRoom for roomId: ${roomState.id}`);
+        socket.emit('joinedRoom', {
+          roomId: roomState.id,
+          players: roomState.players
+        });
 
-      console.log(`Room created: ${roomState.id}, Public: ${isPublic}, Host: ${username}`);
-      
-      // Broadcast initial game state
-      io.to(roomState.id).emit('gameState', {
-        status: 'waiting',
-        players: roomState.players,
-        currentDrawer: null,
-        word: '',
-        wordOptions: [],
-        timeLeft: 0,
-        round: 1,
-        totalRounds: 3,
-        currentHint: '',
-        hintNumber: 0,
-        isGameOver: false,
-        winners: []
-      });
+        console.log(`Room created: ${roomState.id}, Public: ${isPublic}, Host: ${username}`);
+        
+        // Broadcast initial game state
+        io.to(roomState.id).emit('gameState', {
+          status: 'waiting',
+          players: roomState.players,
+          roundNumber: 1,
+          maxRounds: 3,
+          timeLeft: 0,
+          messages: [],
+          drawer: "",
+          drawerName: "",
+          isDrawing: false,
+          round: 1,
+          totalRounds: 3
+        });
+      }, 100); // Small delay to ensure connection stability
 
     } catch (error) {
       console.error('Error creating room:', error);
-      socket.emit('error', { message: error.message || 'Failed to create room' });
+      socket.emit('errorMessage', error.message || 'Failed to create room');
     }
   });
   
@@ -691,7 +828,10 @@ io.on('connection', (socket) => {
   });
   
   socket.on('getPublicRooms', () => {
-    socket.emit('publicRooms', getPublicRoomsInfo());
+    console.log(`Socket ${socket.id} requested public rooms`);
+    const publicRoomsInfo = getPublicRoomsInfo();
+    console.log(`Sending ${publicRoomsInfo.length} public rooms:`, publicRoomsInfo);
+    socket.emit('publicRooms', publicRoomsInfo);
   });
   
   socket.on('startGame', (settings) => {
@@ -1006,67 +1146,70 @@ io.on('connection', (socket) => {
       const playerIndex = room.players.findIndex(p => p.id === socket.id);
 
       if (playerIndex !== -1) {
-        // Mark the player as disconnected
-        room.players[playerIndex].disconnected = true;
-
-        // If the disconnected player was the drawer, end the round
-        if (room.currentDrawer === socket.id && room.status === 'playing') {
-          endRound(user.roomId);
-        }
-
-        // If all players are disconnected, schedule room for cleanup
-        const connectedPlayers = room.players.filter(p => !p.disconnected);
-        if (connectedPlayers.length === 0) {
-          console.log(`Scheduling cleanup for empty room: ${user.roomId}`);
-          setTimeout(() => {
-            const room = rooms.get(user.roomId);
-            if (room && room.players.every(p => p.disconnected)) {
-              console.log(`Cleaning up empty room: ${user.roomId}`);
-              if (room.timer) {
-                clearInterval(room.timer);
-              }
-              rooms.delete(user.roomId);
-              if (room.isPublic) {
-                publicRooms.delete(user.roomId);
-              }
-            }
-          }, ROOM_CLEANUP_INTERVAL);
-        }
-
-        // If the host disconnected, assign a new host
-        if (room.players[playerIndex].isHost) {
-          const newHost = room.players.find(p => !p.disconnected);
-          if (newHost) {
-            newHost.isHost = true;
-          }
-        }
-
-        // Broadcast updated game state
-        io.to(user.roomId).emit('gameState', {
-          state: room.status,
-          players: room.players,
-          currentDrawer: room.currentDrawer,
-          word: room.word,
-          wordOptions: room.wordOptions,
-          timeLeft: room.timeLeft,
-          round: room.round,
-          totalRounds: room.totalRounds,
-          currentHint: room.currentHint,
-          hintNumber: room.hintNumber,
-          isGameOver: room.isGameOver,
-          winners: room.winners
-        });
-
+        // Don't immediately mark as disconnected - give time for potential reconnect
+        console.log(`Player ${user.username} disconnected - keeping in room for potential reconnect`);
+        
         // Store disconnect info for potential reconnection
-        disconnectedUsers.set(socket.handshake.address, {
+        disconnectedUsers.set(socket.id, {
           username: user.username,
           roomId: user.roomId,
           avatar: user.avatar,
-          timestamp: Date.now()
+          timestamp: Date.now(),
+          playerIndex
         });
+        
+        // Wait a short time before actually marking as disconnected
+        setTimeout(() => {
+          // Check if user reconnected in the meantime
+          if (disconnectedUsers.has(socket.id)) {
+            console.log(`Player ${user.username} did not reconnect within timeout - marking as disconnected`);
+            
+            if (room.players[playerIndex]) {
+              // Mark the player as disconnected
+              room.players[playerIndex].disconnected = true;
+              
+              // If the disconnected player was the drawer, end the round
+              if (room.currentDrawer === socket.id && room.status === 'playing') {
+                endRound(user.roomId);
+              }
+              
+              // If all players are disconnected, schedule room for cleanup
+              const connectedPlayers = room.players.filter(p => !p.disconnected);
+              if (connectedPlayers.length === 0) {
+                console.log(`Scheduling cleanup for empty room: ${user.roomId}`);
+                setTimeout(() => {
+                  const room = rooms.get(user.roomId);
+                  if (room && room.players.every(p => p.disconnected)) {
+                    console.log(`Cleaning up empty room: ${user.roomId}`);
+                    if (room.timer) {
+                      clearInterval(room.timer);
+                    }
+                    rooms.delete(user.roomId);
+                    if (room.isPublic) {
+                      publicRooms.delete(user.roomId);
+                    }
+                  }
+                }, ROOM_CLEANUP_INTERVAL);
+              }
+              
+              // If the host disconnected, assign a new host
+              if (room.players[playerIndex].isHost) {
+                const newHost = room.players.find(p => !p.disconnected);
+                if (newHost) {
+                  newHost.isHost = true;
+                }
+              }
+              
+              // Broadcast player status update
+              io.to(user.roomId).emit('playerStatus', {
+                players: room.players
+              });
+            }
+            
+            disconnectedUsers.delete(socket.id);
+          }
+        }, 5000); // Wait 5 seconds before marking as disconnected
       }
-
-      users.delete(socket.id);
     } catch (error) {
       console.error('Error handling disconnect:', error);
     }
