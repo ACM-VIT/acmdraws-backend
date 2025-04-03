@@ -530,6 +530,91 @@ function endGame(roomId) {
 
 const ROOM_CLEANUP_INTERVAL = 5 * 60 * 1000;
 
+function handlePlayerLeave(socket, roomId) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+  
+  console.log(`Removing player ${socket.id} from room ${roomId}`);
+  
+  const wasDrawing = room.currentDrawer && room.currentDrawer.id === socket.id;
+  const leavingPlayer = room.players.find(player => player.id === socket.id);
+  const leavingPlayerName = leavingPlayer ? leavingPlayer.username : 'Player';
+  
+  room.players = room.players.filter(player => player.id !== socket.id);
+  
+  if (room.players.length === 0) {
+    rooms.delete(roomId);
+    console.log(`Room deleted: ${roomId}`);
+    updatePublicRoomsList();
+    return;
+  }
+  
+  if (room.hostId === socket.id) {
+    room.hostId = room.players[0].id;
+    room.players[0].isHost = true;
+  }
+  
+  if (wasDrawing) {
+    console.log(`Drawer ${leavingPlayerName} left during their turn`);
+    
+    const drawerLeftMessage = {
+      id: `system-${Date.now()}`,
+      playerId: 'system',
+      username: 'System',
+      message: `${leavingPlayerName} left while drawing`,
+      isSystemMessage: true,
+      type: 'leave-drawing',
+      timestamp: Date.now()
+    };
+    
+    if (room.chatHistory) {
+      room.chatHistory.push(drawerLeftMessage);
+      
+      if (room.chatHistory.length > 100) {
+        room.chatHistory.shift();
+      }
+    }
+    
+    io.to(roomId).emit('chatMessage', drawerLeftMessage);
+    
+    if (room.timer) {
+      clearInterval(room.timer);
+      room.timer = null;
+    }
+    
+    if (room.status === 'playing' || room.status === 'selecting') {
+      setTimeout(() => {
+        startRound(roomId);
+      }, 2000);
+    }
+  } else {
+    const leaveMessage = {
+      id: `system-${Date.now()}`,
+      username: 'System',
+      message: `${leavingPlayerName} left the room`,
+      type: 'system',
+      timestamp: Date.now()
+    };
+    
+    if (room.chatHistory) {
+      room.chatHistory.push(leaveMessage);
+      
+      if (room.chatHistory.length > 100) {
+        room.chatHistory.shift();
+      }
+    }
+    
+    io.to(roomId).emit('chatMessage', leaveMessage);
+  }
+  
+  io.to(roomId).emit('playerLeft', {
+    players: room.players,
+    player: leavingPlayer
+  });
+  
+  updatePublicRoomsList();
+}
+
 io.on('connection', (socket) => {
   console.log('New client connected:', socket.id);
   
@@ -819,47 +904,27 @@ io.on('connection', (socket) => {
             players: room.players
           });
           
-          setTimeout(() => {
-            const currentRoom = rooms.get(roomId);
-            if (currentRoom) {
-              const player = currentRoom.players.find(p => p.id === socket.id);
-              if (player && !player.isConnected) {
-                handlePlayerLeave(socket, roomId);
+          const wasDrawing = room.currentDrawer && room.currentDrawer.id === socket.id && 
+                            (room.status === 'playing' || room.status === 'selecting');
+          
+          if (wasDrawing) {
+            handlePlayerLeave(socket, roomId);
+          } else {
+            setTimeout(() => {
+              const currentRoom = rooms.get(roomId);
+              if (currentRoom) {
+                const player = currentRoom.players.find(p => p.id === socket.id);
+                if (player && !player.isConnected) {
+                  handlePlayerLeave(socket, roomId);
+                }
               }
-            }
-          }, 30000);
+            }, 30000);
+          }
         }
       }
     }
   });
 
-  function handlePlayerLeave(socket, roomId) {
-    const room = rooms.get(roomId);
-    if (!room) return;
-    
-    console.log(`Removing player ${socket.id} from room ${roomId}`);
-    
-    room.players = room.players.filter(player => player.id !== socket.id);
-    
-    if (room.players.length === 0) {
-      rooms.delete(roomId);
-      console.log(`Room deleted: ${roomId}`);
-      updatePublicRoomsList();
-      return;
-    }
-    
-    if (room.hostId === socket.id) {
-      room.hostId = room.players[0].id;
-      room.players[0].isHost = true;
-    }
-    
-    io.to(roomId).emit('playerLeft', {
-      players: room.players
-    });
-    
-    updatePublicRoomsList();
-  }
-  
   function leaveRoom(socket, roomId) {
     handlePlayerLeave(socket, roomId);
     socket.leave(roomId);
@@ -906,7 +971,7 @@ io.on('connection', (socket) => {
     }
   });
   
-  socket.on('chatMessage', ({ message }) => {
+  socket.on('chatMessage', ({ message, options }) => {
     try {
       // Get room directly from socket ID
       const roomId = findUserRoom(socket.id);
@@ -980,9 +1045,11 @@ io.on('connection', (socket) => {
         
         const isExactMatch = normalizedGuess === normalizedWord;
         const isCloseEnough = normalizedGuess.length > 6 && 
-                             normalizedWord.length > 6 && 
-                             levenshteinDistance(normalizedGuess, normalizedWord) === 1;
-                             
+                            normalizedWord.length > 6 && 
+                            levenshteinDistance(normalizedGuess, normalizedWord) === 1;
+        
+        const isCloseGuess = options && options.isCloseGuess === true;
+                           
         if (isExactMatch || isCloseEnough) {
           player.hasGuessedCorrectly = true;
           
@@ -996,6 +1063,7 @@ io.on('connection', (socket) => {
             message: `${player.username} guessed the word!`,
             isSystemMessage: true,
             isCorrectGuess: true,
+            type: 'correct',
             timestamp: Date.now()
           };
           
@@ -1031,6 +1099,40 @@ io.on('connection', (socket) => {
               endRound(roomId);
             }, 1500);
           }
+        } else if (isCloseGuess) {
+          const closeGuessMessage = {
+            id: uuidv4(),
+            playerId: 'system',
+            username: 'System',
+            message: `${player.username} is close!`,
+            isSystemMessage: true,
+            type: 'close',
+            timestamp: Date.now()
+          };
+          
+          room.chatHistory.push(closeGuessMessage);
+          
+          if (room.chatHistory.length > 100) {
+            room.chatHistory.shift();
+          }
+          
+          io.to(roomId).emit('chatMessage', closeGuessMessage);
+          
+          const chatMessage = {
+            id: uuidv4(),
+            playerId: socket.id,
+            username: player.username,
+            message,
+            timestamp: Date.now()
+          };
+          
+          room.chatHistory.push(chatMessage);
+          
+          if (room.chatHistory.length > 100) {
+            room.chatHistory.shift();
+          }
+          
+          io.to(roomId).emit('chatMessage', chatMessage);
         } else {
           const chatMessage = {
             id: uuidv4(),
