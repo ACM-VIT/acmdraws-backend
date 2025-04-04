@@ -847,7 +847,7 @@ io.on('connection', (socket) => {
         
         // Add a welcome message to the chat
         const joinMessage = {
-          id: `system-${Date.now()}`,
+          id: `system-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
           username: 'System',
           message: `${sanitizedUsername} joined the room`,
           timestamp: Date.now(),
@@ -889,7 +889,7 @@ io.on('connection', (socket) => {
       
       // Add system message to chat for all users
       io.to(roomId).emit('chatMessage', {
-        id: `system-${Date.now()}`,
+        id: `system-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
         username: 'System',
         message: `${sanitizedUsername} joined the room`,
         timestamp: Date.now(),
@@ -1008,6 +1008,8 @@ io.on('connection', (socket) => {
         // Update player connection status but don't remove them immediately
         const playerIndex = room.players.findIndex(p => p.id === socket.id);
         if (playerIndex !== -1) {
+          const player = room.players[playerIndex];
+          const playerName = player.username;
           room.players[playerIndex].isConnected = false;
           
           // Store disconnect timestamp
@@ -1035,8 +1037,47 @@ io.on('connection', (socket) => {
                             (room.status === 'playing' || room.status === 'selecting');
           
           if (wasDrawing) {
-            // Handle drawer disconnect immediately for better gameplay
+            // Immediately handle drawer disconnection for better gameplay experience
+            console.log(`Drawer ${playerName} disconnected during their turn`);
+            
+            // Send a clear notification message about drawer leaving
+            const drawerLeftMessage = {
+              id: `system-${Date.now()}`,
+              playerId: 'system',
+              username: 'System',
+              message: `${playerName} left while drawing`,
+              isSystemMessage: true,
+              type: 'leave-drawing',
+              timestamp: Date.now()
+            };
+            
+            if (room.chatHistory) {
+              room.chatHistory.push(drawerLeftMessage);
+              
+              if (room.chatHistory.length > 100) {
+                room.chatHistory.shift();
+              }
+            }
+            
+            // Notify all players that drawer left
+            io.to(roomId).emit('chatMessage', drawerLeftMessage);
+            io.to(roomId).emit('drawerLeft', { drawerName: playerName });
+            
+            // Clear any active timers
+            if (room.timer) {
+              clearInterval(room.timer);
+              room.timer = null;
+            }
+            
+            // Handle drawer leaving immediately
             handlePlayerLeave(socket, roomId);
+            
+            // After a small delay, move to next player
+            setTimeout(() => {
+              if (rooms.has(roomId)) {
+                startRound(roomId);
+              }
+            }, 2000);
           } else {
             // Set a timer to remove the player if they don't reconnect
             setTimeout(() => {
