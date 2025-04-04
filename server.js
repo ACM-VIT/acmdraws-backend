@@ -303,16 +303,19 @@ function startRound(roomId) {
   const room = rooms.get(roomId);
   if (!room) return;
   
+  // Clear any existing timer
   if (room.timer) {
     clearInterval(room.timer);
     room.timer = null;
   }
 
+  // Reset all player states for the new turn
   room.players.forEach(player => {
     player.hasGuessedCorrectly = false;
     player.isDrawing = false;
   });
 
+  // Initialize turn tracking if needed
   if (room.currentTurn === undefined) {
     room.currentTurn = 1;
   }
@@ -320,13 +323,15 @@ function startRound(roomId) {
   const activePlayers = room.players.filter(player => player.isConnected);
   const totalTurnsInRound = activePlayers.length;
 
+  // Check if we've completed all turns in the current round
   if (room.currentTurn > totalTurnsInRound) {
+    // Start new round
     room.currentTurn = 1;
     room.players.forEach(player => {
       player.hasDrawnThisRound = false;
     });
     room.round++;
-    room.lastDrawer = null;
+    room.lastDrawer = null; // Reset last drawer for new round
 
     if (room.round > room.totalRounds) {
       return endGame(roomId);
@@ -544,6 +549,7 @@ function endGame(roomId) {
 const ROOM_CLEANUP_INTERVAL = 5 * 60 * 1000;
 
 function handlePlayerLeave(socket, roomId, recursionDepth = 0) {
+  // Prevent infinite recursion
   if (recursionDepth > 1) {
     console.warn(`Prevented recursive player leave handling for room ${roomId}`);
     return;
@@ -557,8 +563,10 @@ function handlePlayerLeave(socket, roomId, recursionDepth = 0) {
   const leavingPlayer = room.players.find(player => player.id === socket.id);
   const leavingPlayerName = leavingPlayer ? leavingPlayer.username : 'Player';
 
+  // Update players list
   room.players = room.players.filter(player => player.id !== socket.id);
 
+  // Handle empty room
   if (room.players.length === 0) {
     const roomTimer = room.timer;
     rooms.delete(roomId);
@@ -570,11 +578,13 @@ function handlePlayerLeave(socket, roomId, recursionDepth = 0) {
     return;
   }
 
+  // Update host if needed
   if (room.hostId === socket.id) {
     room.hostId = room.players[0].id;
     room.players[0].isHost = true;
   }
 
+  // Handle drawer leaving
   if (wasDrawing) {
     console.log(`Drawer ${leavingPlayerName} left during their turn`);
     const drawerLeftMessage = {
@@ -600,6 +610,7 @@ function handlePlayerLeave(socket, roomId, recursionDepth = 0) {
       room.timer = null;
     }
 
+    // Start new round after brief delay
     setTimeout(() => {
       if (rooms.has(roomId)) {
         startRound(roomId);
@@ -712,6 +723,7 @@ io.on('connection', (socket) => {
       return;
     }
 
+    // If player is already in the room, update their socket
     const existingPlayer = room.players.find(p => p.clientId === clientId);
     if (existingPlayer) {
       existingPlayer.id = socket.id;
@@ -1094,6 +1106,7 @@ io.on('connection', (socket) => {
     }
   });
   
+  // Update room activity tracker in drawing handler
   socket.on('drawing', (data) => {
     try {
       const roomId = findUserRoom(socket.id);
@@ -1101,34 +1114,52 @@ io.on('connection', (socket) => {
         console.error('No room found for socket ID:', socket.id);
         return;
       }
-      const room = rooms[roomId];
+      
+      // Get room and update last activity
+      const room = rooms.get(roomId);
       if (!room) {
         console.error('Room not found:', roomId);
         return;
       }
-      if (room.currentDrawer !== socket.id) {
+      
+      room.lastActivity = Date.now();
+      
+      if (room.currentDrawer && room.currentDrawer.id !== socket.id) {
         console.log('Ignoring drawing from non-drawer:', socket.id);
         return;
       }
       
-      if (data.type === 'clear') {
+      // Handle different types of drawing data
+      if (data.type === 'clear' || data.clear) {
         console.log(`Clearing canvas in room ${roomId}`);
         room.drawingHistory = [];
-        io.to(roomId).emit('drawingData', data);
+        io.to(roomId).emit('drawingData', { clear: true });
         return;
       }
       
       if (data.fill) {
-        console.log(`Received fill event from ${socket.id} to room ${roomId}: Fill at (${data.x},${data.y}) with color ${data.color}`);
-        room.drawingHistory.push(data);
-        io.to(roomId).emit('drawingData', data);
+        // Handle fill events
+        if (typeof data.x === 'number' && typeof data.y === 'number' && data.color) {
+          console.log(`Received fill event from ${socket.id} to room ${roomId}: Fill at (${data.x},${data.y}) with color ${data.color}`);
+          room.drawingHistory.push(data);
+          io.to(roomId).emit('drawingData', data);
+        } else {
+          console.error('Invalid fill coordinates:', data);
+        }
         return;
       }
       
-      console.log(`Received drawing data from ${socket.id} to room ${roomId}:`, 
-        `Line (${data.x0},${data.y0}) to (${data.x1},${data.y1})`);
-      room.drawingHistory.push(data);
-      io.to(roomId).emit('drawingData', data);
+      // Handle line drawing
+      if (typeof data.x0 === 'number' && 
+          typeof data.y0 === 'number' && 
+          typeof data.x1 === 'number' && 
+          typeof data.y1 === 'number') {
+        console.log(`Drawing line from (${data.x0},${data.y0}) to (${data.x1},${data.y1})`);
+        room.drawingHistory.push(data);
+        io.to(roomId).emit('drawingData', data);
+      } else {
+        console.error('Invalid drawing coordinates received:', data);
+      }
     } catch (error) {
       console.error('Error handling drawing data:', error);
     }
@@ -1159,9 +1190,11 @@ io.on('connection', (socket) => {
   });
 });
 
+// Update room cleanup interval logic 
 setInterval(() => {
   const now = Date.now();
   for (const [roomId, room] of rooms.entries()) {
+    // Update inactive player cleanup
     room.players = room.players.filter(player => {
       if (!player.isConnected && player.disconnectedAt && (now - player.disconnectedAt > 120000)) {
         console.log(`Removing inactive player ${player.username} from room ${roomId}`);
@@ -1169,7 +1202,12 @@ setInterval(() => {
       }
       return true;
     });
-    if (room.players.length === 0 || (now - room.lastActivity > 1800000)) {
+
+    // Only cleanup room if:
+    // 1. No players left OR
+    // 2. Room has been inactive for 30 minutes AND game is not in progress
+    if (room.players.length === 0 || 
+       (now - room.lastActivity > 1800000 && room.status !== 'playing' && room.status !== 'selecting')) {
       const roomTimer = room.timer;
       console.log(`Deleting inactive room: ${roomId}`);
       rooms.delete(roomId);
@@ -1178,14 +1216,17 @@ setInterval(() => {
       }
     }
   }
+
+  // Update user session cleanup
   for (const [clientId, userData] of usersByClientId.entries()) {
     if (!userData.isConnected && userData.lastDisconnected && (now - userData.lastDisconnected > 3600000)) {
       console.log(`Cleaning up stale user session for client ${clientId}`);
       usersByClientId.delete(clientId);
     }
   }
+  
   updatePublicRoomsList();
-}, 60000);
+}, 60000); // Run cleanup every minute
 
 app.use((err, req, res, next) => {
   console.error('Server error:', err);
