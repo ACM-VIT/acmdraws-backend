@@ -338,16 +338,19 @@ function startRound(roomId) {
     });
   }
 
+  // Get eligible drawers (connected players who haven't drawn this round and weren't the last drawer)
   const eligibleDrawers = room.players.filter(player => 
     !player.hasDrawnThisRound && 
     player.isConnected &&
     (!room.lastDrawer || player.id !== room.lastDrawer.id)
   );
 
+  // Select next drawer
   let nextDrawer;
   if (eligibleDrawers.length > 0) {
     nextDrawer = eligibleDrawers[Math.floor(Math.random() * eligibleDrawers.length)];
   } else {
+    // If no eligible drawers, reset for next round
     room.players.forEach(player => {
       player.hasDrawnThisRound = false;
     });
@@ -359,12 +362,14 @@ function startRound(roomId) {
       return endGame(roomId);
     }
 
+    // Get first eligible player for new round
     nextDrawer = room.players.find(p => 
       p.isConnected && 
       (!room.lastDrawer || p.id !== room.lastDrawer.id)
     );
 
     if (!nextDrawer && activePlayers.length > 0) {
+      // Fallback if no eligible players found
       nextDrawer = activePlayers[0];
     }
   }
@@ -374,6 +379,7 @@ function startRound(roomId) {
     return;
   }
 
+  // Setup new drawer
   nextDrawer.isDrawing = true;
   nextDrawer.hasDrawnThisRound = true;
   room.currentDrawer = nextDrawer;
@@ -381,6 +387,7 @@ function startRound(roomId) {
   
   console.log(`Player ${nextDrawer.username} is now drawing in room ${roomId} (Turn ${room.currentTurn} of ${totalTurnsInRound})`);
 
+  // Clear canvas and start word selection
   io.to(roomId).emit('canvasCleared');
   io.to(roomId).emit('turnStarted', {
     players: room.players,
@@ -389,6 +396,7 @@ function startRound(roomId) {
     totalTurns: totalTurnsInRound
   });
 
+  // Increment the turn counter after the current player has been set up
   room.currentTurn++;
 
   let wordOptions;
@@ -469,29 +477,36 @@ function endRound(roomId) {
     room.timer = null;
   }
 
+  // Check if all players have drawn in this round
   const allPlayersHaveDrawn = room.players.every(player => {
     return player.hasDrawnThisRound === true || !player.isConnected;
   });
 
+  // Reset player states for next turn
   room.players.forEach(player => {
     player.hasGuessedCorrectly = false;
     player.isDrawing = false;
+    player.currentTurn = false;
   });
+  room.currentDrawer = null;
 
+  // Send turn or round end event based on whether all players have drawn
   if (allPlayersHaveDrawn) {
     io.to(roomId).emit('roundEnded', {
       word: room.word,
-      players: room.players,
+      players: room.players.map(p => ({...p, hasGuessedCorrectly: false})), // Reset the state in the emitted data
       isLastRound: room.round >= room.totalRounds && allPlayersHaveDrawn,
       round: room.round,
-      totalRounds: room.totalRounds
+      totalRounds: room.totalRounds,
+      status: 'waiting'
     });
   } else {
     io.to(roomId).emit('turnEnded', {
       word: room.word,
-      players: room.players,
+      players: room.players.map(p => ({...p, hasGuessedCorrectly: false})), // Reset the state in the emitted data
       currentTurn: room.players.filter(p => p.hasDrawnThisRound).length + 1,
-      totalTurns: room.players.filter(p => p.isConnected).length
+      totalTurns: room.players.filter(p => p.isConnected).length,
+      status: 'waiting'
     });
   }
 
@@ -503,6 +518,7 @@ function endRound(roomId) {
         // Reset all hasDrawnThisRound flags for the new round
         room.players.forEach(player => {
           player.hasDrawnThisRound = false;
+          player.hasGuessedCorrectly = false; // Ensure this is reset for new round
         });
         room.round++;
         startRound(roomId);
@@ -528,7 +544,6 @@ function endGame(roomId) {
 const ROOM_CLEANUP_INTERVAL = 5 * 60 * 1000;
 
 function handlePlayerLeave(socket, roomId, recursionDepth = 0) {
-  // Prevent infinite recursion
   if (recursionDepth > 1) {
     console.warn(`Prevented recursive player leave handling for room ${roomId}`);
     return;
@@ -542,10 +557,8 @@ function handlePlayerLeave(socket, roomId, recursionDepth = 0) {
   const leavingPlayer = room.players.find(player => player.id === socket.id);
   const leavingPlayerName = leavingPlayer ? leavingPlayer.username : 'Player';
 
-  // Update players list
   room.players = room.players.filter(player => player.id !== socket.id);
 
-  // Handle empty room
   if (room.players.length === 0) {
     const roomTimer = room.timer;
     rooms.delete(roomId);
@@ -557,13 +570,11 @@ function handlePlayerLeave(socket, roomId, recursionDepth = 0) {
     return;
   }
 
-  // Update host if needed
   if (room.hostId === socket.id) {
     room.hostId = room.players[0].id;
     room.players[0].isHost = true;
   }
 
-  // Handle drawer leaving
   if (wasDrawing) {
     console.log(`Drawer ${leavingPlayerName} left during their turn`);
     const drawerLeftMessage = {
@@ -595,6 +606,7 @@ function handlePlayerLeave(socket, roomId, recursionDepth = 0) {
       }
     }, 2000);
   } else {
+    // Regular player left message
     const leaveMessage = {
       id: `system-${Date.now()}`,
       username: 'System',
@@ -612,6 +624,7 @@ function handlePlayerLeave(socket, roomId, recursionDepth = 0) {
     io.to(roomId).emit('chatMessage', leaveMessage);
   }
 
+  // Notify remaining players
   io.to(roomId).emit('playerLeft', {
     players: room.players,
     player: leavingPlayer
@@ -675,96 +688,71 @@ io.on('connection', (socket) => {
     }
   });
   socket.on('joinRoom', (data) => {
-    try {
-      const { roomId, username, avatar = 0, clientId } = data;
-      if (!username) {
-        return socket.emit('errorMessage', 'Username required');
-      }
-      if (!roomId) {
-        return socket.emit('errorMessage', 'Room ID required');
-      }
-      const sanitizedUsername = username.substring(0, 20).trim();
-      const room = rooms.get(roomId);
-      if (!room) {
-        return socket.emit('errorMessage', 'Room not found');
-      }
-      if (room.players.length >= (room.maxPlayers || 8)) {
-        return socket.emit('errorMessage', 'Room is full');
-      }
-      const player = {
-        id: socket.id,
-        username: sanitizedUsername,
-        score: 0,
-        avatar: avatar || 0,
-        isHost: false,
-        isDrawing: false,
-        hasGuessedCorrectly: false,
-        isConnected: true
-      };
-      if (clientId) {
-        usersByClientId.set(clientId, {
-          socketId: socket.id,
-          username: sanitizedUsername,
-          avatar: avatar || 0
-        });
-      }
-      room.players.push(player);
+    console.log('Join room request received:', data);
+    const { roomId, username, avatar, clientId } = data;
+
+    if (!roomId || !username) {
+      socket.emit('errorMessage', 'Invalid room join request');
+      return;
+    }
+
+    const room = rooms.get(roomId);
+    if (!room) {
+      socket.emit('errorMessage', 'Room not found');
+      return;
+    }
+
+    if (room.players.length >= room.maxPlayers) {
+      socket.emit('errorMessage', 'Room is full');
+      return;
+    }
+
+    if (room.gameInProgress && !room.players.some(p => p.clientId === clientId)) {
+      socket.emit('errorMessage', 'Game is in progress');
+      return;
+    }
+
+    const existingPlayer = room.players.find(p => p.clientId === clientId);
+    if (existingPlayer) {
+      existingPlayer.id = socket.id;
+      existingPlayer.isConnected = true;
       socket.join(roomId);
-      let joinData = {
+      socket.emit('rejoinedRoom', {
         roomId,
-        players: room.players
-      };
-      if (room.status !== 'waiting') {
-        const isDrawing = false;
-        const currentWord = isDrawing ? room.word : '';
-        const joinMessage = {
-          id: `system-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-          username: 'System',
-          message: `${sanitizedUsername} joined the room`,
-          timestamp: Date.now(),
-          type: 'system'
-        };
-        room.chatHistory.push(joinMessage);
-        joinData = {
-          ...joinData,
-          gameState: {
-            status: room.status,
-            round: room.round,
-            totalRounds: room.totalRounds,
-            timeLeft: room.timeLeft,
-            drawer: room.currentDrawer?.id || '',
-            drawerName: room.currentDrawer?.username || '',
-            isDrawing: isDrawing
-          },
-          word: currentWord,
-          round: room.round,
-          totalRounds: room.totalRounds,
-          currentDrawer: room.currentDrawer?.id || '',
-          timeLeft: room.timeLeft,
-          chatMessages: room.chatHistory
-        };
-        socket.emit('rejoinedRoom', joinData);
-      } else {
-        socket.emit('joinedRoom', joinData);
-      }
-      socket.to(roomId).emit('playerJoined', { 
         players: room.players,
-        player: player
+        gameState: room.gameState,
+        word: existingPlayer.isDrawing ? room.currentWord : undefined,
+        round: room.round,
+        totalRounds: room.totalRounds,
+        currentDrawer: room.currentDrawer?.id,
+        timeLeft: room.timeLeft,
+        chatMessages: room.chatHistory
       });
-      io.to(roomId).emit('chatMessage', {
-        id: `system-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-        username: 'System',
-        message: `${sanitizedUsername} joined the room`,
-        timestamp: Date.now(),
-        type: 'system'
-      });
-      console.log(`Player ${sanitizedUsername} joined room ${roomId}`);
-      if (room.isPublic) {
-        updatePublicRoomInfo(roomId);
-      }
-    } catch (error) {
-      console.error('Error joining room:', error);
-      socket.emit('errorMessage', 'Failed to join room');
+      io.to(roomId).emit('playerStatus', { players: room.players });
+      return;
+    }
+
+    const player = {
+      id: socket.id,
+      username,
+      clientId,
+      avatar: avatar || 0,
+      score: 0,
+      isHost: room.players.length === 0,
+      isDrawing: false,
+      hasGuessedCorrectly: false,
+      isConnected: true
+    };
+
+    room.players.push(player);
+    socket.join(roomId);
+
+    console.log(`Player ${username} joined room ${roomId}`);
+    socket.emit('joinedRoom', { roomId, players: room.players });
+    io.to(roomId).emit('playerJoined', { players: room.players, player });
+
+    if (room.isPublic) {
+      updatePublicRoomInfo(roomId);
     }
   });
   socket.on('startGame', (settings) => {
@@ -1113,29 +1101,34 @@ io.on('connection', (socket) => {
         console.error('No room found for socket ID:', socket.id);
         return;
       }
-      const room = rooms.get(roomId);
+      const room = rooms[roomId];
       if (!room) {
-        console.error('Room not found with ID:', roomId);
+        console.error('Room not found:', roomId);
         return;
       }
-      if (!room.currentDrawer || room.currentDrawer.id !== socket.id || room.status !== 'playing') {
-        console.error(`User ${socket.id} is not the current drawer or room is not in playing state`);
+      if (room.currentDrawer !== socket.id) {
+        console.log('Ignoring drawing from non-drawer:', socket.id);
         return;
       }
+      
+      if (data.type === 'clear') {
+        console.log(`Clearing canvas in room ${roomId}`);
+        room.drawingHistory = [];
+        io.to(roomId).emit('drawingData', data);
+        return;
+      }
+      
       if (data.fill) {
         console.log(`Received fill event from ${socket.id} to room ${roomId}: Fill at (${data.x},${data.y}) with color ${data.color}`);
         room.drawingHistory.push(data);
-        socket.to(roomId).emit('drawingData', data);
+        io.to(roomId).emit('drawingData', data);
         return;
       }
+      
       console.log(`Received drawing data from ${socket.id} to room ${roomId}:`, 
-        data.type === 'clear' ? 'CLEAR CANVAS' : `Line (${data.x0},${data.y0}) to (${data.x1},${data.y1})`);
-      if (data.type !== 'clear') {
-        room.drawingHistory.push(data);
-      } else {
-        room.drawingHistory = [];
-      }
-      socket.to(roomId).emit('drawingData', data);
+        `Line (${data.x0},${data.y0}) to (${data.x1},${data.y1})`);
+      room.drawingHistory.push(data);
+      io.to(roomId).emit('drawingData', data);
     } catch (error) {
       console.error('Error handling drawing data:', error);
     }
