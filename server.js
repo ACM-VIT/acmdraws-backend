@@ -306,9 +306,16 @@ function startRound(roomId) {
     clearInterval(room.timer);
     room.timer = null;
   }
+
+  room.players.forEach(player => {
+    player.isDrawing = false;
+    player.hasGuessedCorrectly = false;
+  });
+
   const allPlayersHaveDrawn = room.players.every(player => {
     return player.hasDrawnThisRound === true || !player.isConnected;
   });
+
   if (allPlayersHaveDrawn) {
     room.players.forEach(player => {
       player.hasDrawnThisRound = false;
@@ -322,33 +329,38 @@ function startRound(roomId) {
       totalRounds: room.totalRounds
     });
   }
-  console.log(`Starting round ${room.round} in room ${roomId}`);
-  room.players.forEach(player => {
-    player.isDrawing = false;
-    player.hasGuessedCorrectly = false;
-  });
+
   const eligibleDrawers = room.players.filter(player => 
-    !player.hasDrawnThisRound && player.isConnected
+    !player.hasDrawnThisRound && 
+    player.isConnected &&
+    (!room.lastDrawer || player.id !== room.lastDrawer.id) // Prevent consecutive turns
   );
-  if (eligibleDrawers.length === 0) {
-    console.error(`No eligible drawers in room ${roomId}`);
-    return endGame(roomId);
-  }
+
+  console.log(`Starting round ${room.round} in room ${roomId}`);
+
   let nextDrawer;
-  // For the first round, if the host hasn't drawn, choose the host.
   if (room.round === 1 && !room.playerHasDrawn && room.players.some(p => p.isHost && p.isConnected)) {
     nextDrawer = room.players.find(p => p.isHost && p.isConnected);
   } else {
-    // If possible, avoid giving the same person consecutive turns.
-    if (room.currentDrawer && eligibleDrawers.length > 1 && eligibleDrawers[0].id === room.currentDrawer.id) {
-      nextDrawer = eligibleDrawers[1];
+    if (eligibleDrawers.length === 0) {
+      room.players.forEach(player => {
+        if (room.lastDrawer && player.id !== room.lastDrawer.id) {
+          player.hasDrawnThisRound = false;
+        }
+      });
+      nextDrawer = room.players.find(p => 
+        p.isConnected && 
+        (!room.lastDrawer || p.id !== room.lastDrawer.id)
+      );
     } else {
       nextDrawer = eligibleDrawers[0];
     }
   }
+
   nextDrawer.isDrawing = true;
   nextDrawer.hasDrawnThisRound = true;
   room.currentDrawer = nextDrawer;
+  room.lastDrawer = nextDrawer;
   room.playerHasDrawn = true;
   io.to(roomId).emit('canvasCleared');
   let wordOptions;
@@ -424,25 +436,42 @@ function endRound(roomId) {
     clearInterval(room.timer);
     room.timer = null;
   }
+
   const allPlayersHaveDrawn = room.players.every(player => {
     return player.hasDrawnThisRound === true || !player.isConnected;
   });
-  for (const player of room.players) {
+
+  room.players.forEach(player => {
     player.hasGuessedCorrectly = false;
     player.isDrawing = false;
-  }
-  io.to(roomId).emit('roundEnded', {
-    word: room.word,
-    players: room.players,
-    isLastRound: room.round >= room.totalRounds && allPlayersHaveDrawn,
-    round: room.round,
-    totalRounds: room.totalRounds
   });
+
+  if (allPlayersHaveDrawn) {
+    io.to(roomId).emit('roundEnded', {
+      word: room.word,
+      players: room.players,
+      isLastRound: room.round >= room.totalRounds && allPlayersHaveDrawn,
+      round: room.round,
+      totalRounds: room.totalRounds
+    });
+  } else {
+    io.to(roomId).emit('turnEnded', {
+      word: room.word,
+      players: room.players,
+      currentTurn: room.players.filter(p => p.hasDrawnThisRound).length + 1,
+      totalTurns: room.players.filter(p => p.isConnected).length
+    });
+  }
+
   setTimeout(() => {
     if (allPlayersHaveDrawn) {
       if (room.round >= room.totalRounds) {
         endGame(roomId);
       } else {
+        room.players.forEach(player => {
+          player.hasDrawnThisRound = false;
+        });
+        room.round++;
         startRound(roomId);
       }
     } else {
@@ -505,19 +534,16 @@ function handlePlayerLeave(socket, roomId) {
       }
     }
     io.to(roomId).emit('chatMessage', drawerLeftMessage);
-    io.to(roomId).emit('drawerLeft', { drawerName: leavingPlayerName });
     if (room.timer) {
       clearInterval(room.timer);
       room.timer = null;
     }
-    // Removed the recursive call to handlePlayerLeave here.
-    // Instead, directly schedule the next round.
+    handlePlayerLeave(socket, roomId);
     setTimeout(() => {
       if (rooms.has(roomId)) {
         startRound(roomId);
       }
     }, 2000);
-    return; // Exit after handling a drawer leave.
   } else {
     const leaveMessage = {
       id: `system-${Date.now()}`,
