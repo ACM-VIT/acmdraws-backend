@@ -302,28 +302,36 @@ function levenshteinDistance(a, b) {
 function startRound(roomId) {
   const room = rooms.get(roomId);
   if (!room) return;
+  
   if (room.timer) {
     clearInterval(room.timer);
     room.timer = null;
   }
 
   room.players.forEach(player => {
-    player.isDrawing = false;
     player.hasGuessedCorrectly = false;
+    player.isDrawing = false;
   });
 
-  const allPlayersHaveDrawn = room.players.every(player => {
-    return player.hasDrawnThisRound === true || !player.isConnected;
-  });
+  if (room.currentTurn === undefined) {
+    room.currentTurn = 1;
+  }
 
-  if (allPlayersHaveDrawn) {
+  const activePlayers = room.players.filter(player => player.isConnected);
+  const totalTurnsInRound = activePlayers.length;
+
+  if (room.currentTurn > totalTurnsInRound) {
+    room.currentTurn = 1;
     room.players.forEach(player => {
       player.hasDrawnThisRound = false;
     });
     room.round++;
+    room.lastDrawer = null;
+
     if (room.round > room.totalRounds) {
       return endGame(roomId);
     }
+
     io.to(roomId).emit('roundInfo', {
       round: room.round,
       totalRounds: room.totalRounds
@@ -333,45 +341,67 @@ function startRound(roomId) {
   const eligibleDrawers = room.players.filter(player => 
     !player.hasDrawnThisRound && 
     player.isConnected &&
-    (!room.lastDrawer || player.id !== room.lastDrawer.id) // Prevent consecutive turns
+    (!room.lastDrawer || player.id !== room.lastDrawer.id)
   );
 
-  console.log(`Starting round ${room.round} in room ${roomId}`);
-
   let nextDrawer;
-  if (room.round === 1 && !room.playerHasDrawn && room.players.some(p => p.isHost && p.isConnected)) {
-    nextDrawer = room.players.find(p => p.isHost && p.isConnected);
+  if (eligibleDrawers.length > 0) {
+    nextDrawer = eligibleDrawers[Math.floor(Math.random() * eligibleDrawers.length)];
   } else {
-    if (eligibleDrawers.length === 0) {
-      room.players.forEach(player => {
-        if (room.lastDrawer && player.id !== room.lastDrawer.id) {
-          player.hasDrawnThisRound = false;
-        }
-      });
-      nextDrawer = room.players.find(p => 
-        p.isConnected && 
-        (!room.lastDrawer || p.id !== room.lastDrawer.id)
-      );
-    } else {
-      nextDrawer = eligibleDrawers[0];
+    room.players.forEach(player => {
+      player.hasDrawnThisRound = false;
+    });
+    room.currentTurn = 1;
+    room.round++;
+    room.lastDrawer = null;
+
+    if (room.round > room.totalRounds) {
+      return endGame(roomId);
     }
+
+    nextDrawer = room.players.find(p => 
+      p.isConnected && 
+      (!room.lastDrawer || p.id !== room.lastDrawer.id)
+    );
+
+    if (!nextDrawer && activePlayers.length > 0) {
+      nextDrawer = activePlayers[0];
+    }
+  }
+
+  if (!nextDrawer) {
+    console.error(`No eligible drawer found in room ${roomId}`);
+    return;
   }
 
   nextDrawer.isDrawing = true;
   nextDrawer.hasDrawnThisRound = true;
   room.currentDrawer = nextDrawer;
   room.lastDrawer = nextDrawer;
-  room.playerHasDrawn = true;
+  
+  console.log(`Player ${nextDrawer.username} is now drawing in room ${roomId} (Turn ${room.currentTurn} of ${totalTurnsInRound})`);
+
   io.to(roomId).emit('canvasCleared');
+  io.to(roomId).emit('turnStarted', {
+    players: room.players,
+    drawer: nextDrawer,
+    currentTurn: room.currentTurn,
+    totalTurns: totalTurnsInRound
+  });
+
+  room.currentTurn++;
+
   let wordOptions;
   if (room.gameMode === 'Custom Words' && room.customWords && room.customWords.length >= 3) {
     wordOptions = [...room.customWords].sort(() => 0.5 - Math.random()).slice(0, 3);
   } else {
     wordOptions = getRandomWords(3);
   }
+
   room.wordOptions = wordOptions;
   room.status = 'selecting';
   room.timeLeft = 15;
+
   io.to(nextDrawer.id).emit('wordSelection', { words: wordOptions });
   io.to(roomId).emit('gameStarted', {
     round: room.round,
@@ -381,12 +411,14 @@ function startRound(roomId) {
       username: nextDrawer.username
     }
   });
+
   io.to(roomId).emit('playerSelecting', {
     drawer: nextDrawer.id,
     drawerName: nextDrawer.username
   });
-  console.log(`Player ${nextDrawer.username} is now drawing in room ${roomId}`);
+
   startGameTimer(roomId);
+
   if (room.isPublic) {
     updatePublicRoomInfo(roomId);
   }
@@ -468,6 +500,7 @@ function endRound(roomId) {
       if (room.round >= room.totalRounds) {
         endGame(roomId);
       } else {
+        // Reset all hasDrawnThisRound flags for the new round
         room.players.forEach(player => {
           player.hasDrawnThisRound = false;
         });
@@ -494,14 +527,25 @@ function endGame(roomId) {
 
 const ROOM_CLEANUP_INTERVAL = 5 * 60 * 1000;
 
-function handlePlayerLeave(socket, roomId) {
+function handlePlayerLeave(socket, roomId, recursionDepth = 0) {
+  // Prevent infinite recursion
+  if (recursionDepth > 1) {
+    console.warn(`Prevented recursive player leave handling for room ${roomId}`);
+    return;
+  }
+
   const room = rooms.get(roomId);
   if (!room) return;
+  
   console.log(`Removing player ${socket.id} from room ${roomId}`);
   const wasDrawing = room.currentDrawer && room.currentDrawer.id === socket.id;
   const leavingPlayer = room.players.find(player => player.id === socket.id);
   const leavingPlayerName = leavingPlayer ? leavingPlayer.username : 'Player';
+
+  // Update players list
   room.players = room.players.filter(player => player.id !== socket.id);
+
+  // Handle empty room
   if (room.players.length === 0) {
     const roomTimer = room.timer;
     rooms.delete(roomId);
@@ -512,10 +556,14 @@ function handlePlayerLeave(socket, roomId) {
     updatePublicRoomsList();
     return;
   }
+
+  // Update host if needed
   if (room.hostId === socket.id) {
     room.hostId = room.players[0].id;
     room.players[0].isHost = true;
   }
+
+  // Handle drawer leaving
   if (wasDrawing) {
     console.log(`Drawer ${leavingPlayerName} left during their turn`);
     const drawerLeftMessage = {
@@ -527,18 +575,20 @@ function handlePlayerLeave(socket, roomId) {
       type: 'leave-drawing',
       timestamp: Date.now()
     };
+
     if (room.chatHistory) {
       room.chatHistory.push(drawerLeftMessage);
       if (room.chatHistory.length > 100) {
         room.chatHistory.shift();
       }
     }
+
     io.to(roomId).emit('chatMessage', drawerLeftMessage);
     if (room.timer) {
       clearInterval(room.timer);
       room.timer = null;
     }
-    handlePlayerLeave(socket, roomId);
+
     setTimeout(() => {
       if (rooms.has(roomId)) {
         startRound(roomId);
@@ -552,6 +602,7 @@ function handlePlayerLeave(socket, roomId) {
       type: 'system',
       timestamp: Date.now()
     };
+
     if (room.chatHistory) {
       room.chatHistory.push(leaveMessage);
       if (room.chatHistory.length > 100) {
@@ -560,10 +611,12 @@ function handlePlayerLeave(socket, roomId) {
     }
     io.to(roomId).emit('chatMessage', leaveMessage);
   }
+
   io.to(roomId).emit('playerLeft', {
     players: room.players,
     player: leavingPlayer
   });
+
   updatePublicRoomsList();
 }
 
@@ -822,7 +875,7 @@ io.on('connection', (socket) => {
               clearInterval(room.timer);
               room.timer = null;
             }
-            handlePlayerLeave(socket, roomId);
+            handlePlayerLeave(socket, roomId, 0);
             setTimeout(() => {
               if (rooms.has(roomId)) {
                 startRound(roomId);
@@ -834,7 +887,7 @@ io.on('connection', (socket) => {
               if (currentRoom) {
                 const player = currentRoom.players.find(p => p.id === socket.id);
                 if (player && !player.isConnected) {
-                  handlePlayerLeave(socket, roomId);
+                  handlePlayerLeave(socket, roomId, 0);
                 }
               }
             }, 30000);
@@ -845,7 +898,7 @@ io.on('connection', (socket) => {
   });
 
   function leaveRoom(socket, roomId) {
-    handlePlayerLeave(socket, roomId);
+    handlePlayerLeave(socket, roomId, 0);
     socket.leave(roomId);
   }
   
@@ -928,7 +981,8 @@ io.on('connection', (socket) => {
           username: player.username,
           message,
           timestamp: Date.now(),
-          fromPlayerWhoGuessed: true
+          fromPlayerWhoGuessed: true,
+          fromCorrectGuesser: true // Add this flag for the new chat feature
         };
         room.chatHistory.push(chatMessage);
         if (room.chatHistory.length > 100) {
