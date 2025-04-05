@@ -318,6 +318,8 @@ function startRound(roomId) {
     player.hasGuessedCorrectly = false;
     player.isDrawing = false;  // Explicitly reset drawing state
   });
+  
+  room.currentTurnReactions = new Set();
 
   // Initialize turn tracking if needed
   if (room.currentTurn === undefined) {
@@ -1233,6 +1235,62 @@ io.on('connection', (socket) => {
       io.to(roomId).emit('canvasCleared');
     } catch (error) {
       console.error('Error handling clear canvas:', error);
+    }
+  });
+
+  socket.on('reaction', ({ type }) => {
+    try {
+      if (type !== 'like' && type !== 'dislike') {
+        console.error('Invalid reaction type:', type);
+        return;
+      }
+      
+      const roomId = findUserRoom(socket.id);
+      if (!roomId) {
+        console.error('No room found for socket ID:', socket.id);
+        return;
+      }
+      
+      const room = rooms.get(roomId);
+      if (!room) {
+        console.error('Room not found with ID:', roomId);
+        return;
+      }
+      
+      const player = room.players.find(p => p.id === socket.id);
+      if (!player) {
+        console.error(`Player not found in room ${roomId}`);
+        return;
+      }
+      
+      if (room.currentDrawer && room.currentDrawer.id === socket.id) {
+        return;
+      }
+      
+      if (room.status !== 'playing') {
+        return;
+      }
+      
+      if (!room.currentTurnReactions) {
+        room.currentTurnReactions = new Set();
+      }
+      
+      const playerReactionKey = `${socket.id}:${room.round}:${room.currentDrawer?.id}`;
+      if (room.currentTurnReactions.has(playerReactionKey)) {
+        return;
+      }
+      
+      room.currentTurnReactions.add(playerReactionKey);
+      
+      console.log(`Player ${player.username} ${type}d the drawing in room ${roomId}`);
+      
+      io.to(roomId).emit('playerReaction', { 
+        playerId: socket.id,
+        username: player.username,
+        type
+      });
+    } catch (error) {
+      console.error('Error handling reaction:', error);
     }
   });
 });
