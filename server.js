@@ -25,6 +25,16 @@ app.get('/', (req, res) => {
   res.send('well what are you doing here?');
 });
 
+const SERVER_CONFIG = {
+  MAINTENANCE_MODE: false,        // Set to true to put server in maintenance mode
+  DISABLE_USERNAME_EDIT: false,   // Set to true to prevent players from changing default usernames
+  FORCE_PRIVATE_ROOMS: false,     // Set to true to disable public rooms
+  MAX_PLAYERS_PER_ROOM: 12,       // Maximum players allowed per room
+  CUSTOM_WORDS_ENABLED: true,     // Set to false to disable custom words
+  MAINTENANCE_MESSAGE: "The server is currently undergoing maintenance. Please try again later.",
+  VERSION: "1.0.0"                // Current server version
+};
+
 function generateRoomId() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
@@ -632,8 +642,16 @@ function handlePlayerLeave(socket, roomId, recursionDepth = 0) {
   updatePublicRoomsList();
 }
 
+app.get('/api/config', (req, res) => {
+  res.status(200).json(SERVER_CONFIG);
+});
+
 io.on('connection', (socket) => {
   console.log('New client connected:', socket.id);
+
+  // Send server configuration to client immediately on connection
+  socket.emit('serverConfig', SERVER_CONFIG);
+
   socket.on('identifyUser', (data) => {
     const { username, clientId, avatar } = data;
     if (username) {
@@ -654,6 +672,21 @@ io.on('connection', (socket) => {
         }
       }
     }
+
+    // Check maintenance mode
+    if (SERVER_CONFIG.MAINTENANCE_MODE) {
+      socket.emit('maintenanceMode', { 
+        message: SERVER_CONFIG.MAINTENANCE_MESSAGE 
+      });
+      return;
+    }
+
+    // Check username edit restrictions
+    if (SERVER_CONFIG.DISABLE_USERNAME_EDIT && data.username && data.username.startsWith('Player')) {
+      socket.emit('usernameRestricted', { 
+        message: "Changing the default username is currently disabled." 
+      });
+    }
   });
   socket.on('createRoom', (data) => {
     try {
@@ -670,7 +703,17 @@ io.on('connection', (socket) => {
           avatar: avatar || 0
         });
       }
-      const isRoomPublic = isPublic === true || (isPrivate === false);
+
+      // Check maintenance mode
+      if (SERVER_CONFIG.MAINTENANCE_MODE) {
+        socket.emit('maintenanceMode', { 
+          message: SERVER_CONFIG.MAINTENANCE_MESSAGE 
+        });
+        return;
+      }
+
+      // Enforce private rooms if flag is enabled
+      const isRoomPublic = SERVER_CONFIG.FORCE_PRIVATE_ROOMS ? false : (isPublic === true || (isPrivate === false));
       const roomState = createRoomState(isRoomPublic, socket.id, sanitizedUsername, avatar);
       const roomId = roomState.id;
       console.log(`Explicitly joining socket ${socket.id} to room ${roomId}`);
@@ -776,14 +819,24 @@ io.on('connection', (socket) => {
       // Set game settings
       room.drawTime = settings.drawTime || 80;
       room.totalRounds = settings.rounds || 3;
-      room.maxPlayers = settings.maxPlayers || 8;
+
+      // Apply server-side restrictions to game settings
+      const maxAllowedPlayers = Math.min(settings.maxPlayers || 8, SERVER_CONFIG.MAX_PLAYERS_PER_ROOM);
+      room.maxPlayers = maxAllowedPlayers;
+
       room.gameMode = settings.gameMode || 'Normal';
       room.hintsInterval = settings.hintsInterval || 2;
-      if (room.gameMode === 'Custom Words' && settings.customWords) {
+
+      // Respect custom words flag
+      if (!SERVER_CONFIG.CUSTOM_WORDS_ENABLED) {
+        room.gameMode = 'Normal';
+        room.customWords = [];
+      } else if (room.gameMode === 'Custom Words' && settings.customWords) {
         room.customWords = settings.customWords.split(',')
           .map(word => word.trim())
           .filter(word => word.length > 0 && word.length <= 30);
       }
+
       room.round = 1;
       room.status = 'playing';
 
