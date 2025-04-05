@@ -22,7 +22,7 @@ app.get('/health', (req, res) => {
 });
 
 app.get('/', (req, res) => {
-  res.send('Skribbl Game Server Running');
+  res.send('well what are you doing here?');
 });
 
 function generateRoomId() {
@@ -303,16 +303,10 @@ function startRound(roomId) {
   const room = rooms.get(roomId);
   if (!room) return;
   
-  // Clear any existing timer
-  if (room.timer) {
-    clearInterval(room.timer);
-    room.timer = null;
-  }
-
   // Reset all player states for the new turn
   room.players.forEach(player => {
     player.hasGuessedCorrectly = false;
-    player.isDrawing = false;
+    player.isDrawing = false;  // Explicitly reset drawing state
   });
 
   // Initialize turn tracking if needed
@@ -390,6 +384,12 @@ function startRound(roomId) {
   room.currentDrawer = nextDrawer;
   room.lastDrawer = nextDrawer;
   
+  // Emit state update to all players
+  io.to(roomId).emit('turnState', {
+    drawer: nextDrawer.id,
+    players: room.players
+  });
+
   console.log(`Player ${nextDrawer.username} is now drawing in room ${roomId} (Turn ${room.currentTurn} of ${totalTurnsInRound})`);
 
   // Clear canvas and start word selection
@@ -482,38 +482,26 @@ function endRound(roomId) {
     room.timer = null;
   }
 
+  // Reset all player states
+  room.players.forEach(player => {
+    player.hasGuessedCorrectly = false;
+    player.isDrawing = false;  // Explicitly reset drawing state
+  });
+  room.currentDrawer = null;
+
+  // Emit turn end with reset states
+  io.to(roomId).emit('turnEnded', {
+    word: room.word,
+    players: room.players,
+    currentTurn: room.currentTurn,
+    totalTurns: room.players.filter(p => p.isConnected).length,
+    status: 'waiting'
+  });
+
   // Check if all players have drawn in this round
   const allPlayersHaveDrawn = room.players.every(player => {
     return player.hasDrawnThisRound === true || !player.isConnected;
   });
-
-  // Reset player states for next turn
-  room.players.forEach(player => {
-    player.hasGuessedCorrectly = false;
-    player.isDrawing = false;
-    player.currentTurn = false;
-  });
-  room.currentDrawer = null;
-
-  // Send turn or round end event based on whether all players have drawn
-  if (allPlayersHaveDrawn) {
-    io.to(roomId).emit('roundEnded', {
-      word: room.word,
-      players: room.players.map(p => ({...p, hasGuessedCorrectly: false})), // Reset the state in the emitted data
-      isLastRound: room.round >= room.totalRounds && allPlayersHaveDrawn,
-      round: room.round,
-      totalRounds: room.totalRounds,
-      status: 'waiting'
-    });
-  } else {
-    io.to(roomId).emit('turnEnded', {
-      word: room.word,
-      players: room.players.map(p => ({...p, hasGuessedCorrectly: false})), // Reset the state in the emitted data
-      currentTurn: room.players.filter(p => p.hasDrawnThisRound).length + 1,
-      totalTurns: room.players.filter(p => p.isConnected).length,
-      status: 'waiting'
-    });
-  }
 
   setTimeout(() => {
     if (allPlayersHaveDrawn) {
@@ -784,6 +772,8 @@ io.on('connection', (socket) => {
       if (!player || !player.isHost) {
         return socket.emit('errorMessage', 'Only host can start the game');
       }
+
+      // Set game settings
       room.drawTime = settings.drawTime || 80;
       room.totalRounds = settings.rounds || 3;
       room.maxPlayers = settings.maxPlayers || 8;
@@ -796,11 +786,14 @@ io.on('connection', (socket) => {
       }
       room.round = 1;
       room.status = 'playing';
-      const firstDrawer = room.players.find(p => p.isHost);
-      if (firstDrawer) {
-        firstDrawer.isDrawing = true;
-        room.currentDrawer = firstDrawer;
-      }
+
+      // Instead of making the host the first drawer, pick a random player
+      const eligiblePlayers = room.players.filter(p => p.isConnected);
+      const randomDrawer = eligiblePlayers[Math.floor(Math.random() * eligiblePlayers.length)];
+      randomDrawer.isDrawing = true;
+      randomDrawer.hasDrawnThisRound = true; // Mark them as having drawn for this round
+      room.currentDrawer = randomDrawer;
+
       io.to(roomId).emit('gameStarted', {
         round: room.round,
         totalRounds: room.totalRounds,
@@ -809,6 +802,7 @@ io.on('connection', (socket) => {
           username: room.currentDrawer.username
         }
       });
+
       const wordOptions = room.gameMode === 'Custom Words' && room.customWords.length >= 3
         ? room.customWords.sort(() => 0.5 - Math.random()).slice(0, 3)
         : getRandomWords(3);
@@ -820,7 +814,7 @@ io.on('connection', (socket) => {
         updatePublicRoomInfo(roomId);
       }
       startGameTimer(roomId);
-      console.log(`Game started in room ${roomId}`);
+      console.log(`Game started in room ${roomId} with drawer ${randomDrawer.username}`);
     } catch (error) {
       console.error('Error starting game:', error);
       socket.emit('errorMessage', 'Failed to start game');
