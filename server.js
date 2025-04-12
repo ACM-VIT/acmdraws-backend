@@ -27,9 +27,9 @@ app.get('/', (req, res) => {
 
 const SERVER_CONFIG = {
   MAINTENANCE_MODE: false,        // Set to true to put server in maintenance mode
-  DISABLE_USERNAME_EDIT: false,   // Set to true to prevent players from changing default usernames
+  DISABLE_USERNAME_EDIT: true,   // Set to true to prevent players from changing default usernames
   FORCE_PRIVATE_ROOMS: false,     // Set to true to disable public rooms
-  MAX_PLAYERS_PER_ROOM: 12,       // Maximum players allowed per room
+  MAX_PLAYERS_PER_ROOM: 20,       // Maximum players allowed per room
   CUSTOM_WORDS_ENABLED: true,     // Set to false to disable custom words
   MAINTENANCE_MESSAGE: "The server is currently undergoing maintenance. Please try again later.",
   VERSION: "1.0.0"                // Current server version
