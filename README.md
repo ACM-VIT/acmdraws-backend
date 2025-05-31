@@ -43,7 +43,7 @@
 
 1.  **Clone the repository:**
     ```bash
-    git clone <repository-url>
+    git clone https://github.com/ACM-VIT/acmdraws-backend
     cd acmdraws-backend
     ```
 
@@ -104,8 +104,8 @@ The server emits events like:
 
 ## ⚙️ Project Management
 
--   Use **Git** for version control and code management.
+-   Using **Git** for version control and code management.
 -   Follow standard Gitflow or a similar branching model.
--   Push to feature branches and create pull requests for review before merging into `main` or `develop` branches.
+-   Push to feature branches and create pull requests for review before merging into `master` or `development` branches.
 
 
