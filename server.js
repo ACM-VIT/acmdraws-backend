@@ -29,7 +29,7 @@ const SERVER_CONFIG = {
   MAINTENANCE_MODE: false,        // Set to true to put server in maintenance mode
   DISABLE_USERNAME_EDIT: true,   // Set to true to prevent players from changing default usernames
   FORCE_PRIVATE_ROOMS: false,     // Set to true to disable public rooms
-  MAX_PLAYERS_PER_ROOM: 20,       // Maximum players allowed per room
+  MAX_PLAYERS_PER_ROOM: 50,       // Maximum players allowed per room
   CUSTOM_WORDS_ENABLED: true,     // Set to false to disable custom words
   MAINTENANCE_MESSAGE: "The server is currently undergoing maintenance. Please try again later.",
   VERSION: "1.0.0"                // Current server version
@@ -316,7 +316,7 @@ function startRound(roomId) {
   // Reset all player states for the new turn
   room.players.forEach(player => {
     player.hasGuessedCorrectly = false;
-    player.isDrawing = false;  // Explicitly reset drawing state
+    player.isDrawing = false;
   });
 
   // Initialize turn tracking if needed
@@ -844,7 +844,7 @@ io.on('connection', (socket) => {
       const eligiblePlayers = room.players.filter(p => p.isConnected);
       const randomDrawer = eligiblePlayers[Math.floor(Math.random() * eligiblePlayers.length)];
       randomDrawer.isDrawing = true;
-      randomDrawer.hasDrawnThisRound = true; // Mark them as having drawn for this round
+      randomDrawer.hasDrawnThisRound = true;
       room.currentDrawer = randomDrawer;
 
       io.to(roomId).emit('gameStarted', {
@@ -1029,7 +1029,7 @@ io.on('connection', (socket) => {
           message,
           timestamp: Date.now(),
           fromPlayerWhoGuessed: true,
-          fromCorrectGuesser: true // Add this flag for the new chat feature
+          fromCorrectGuesser: true
         };
         room.chatHistory.push(chatMessage);
         if (room.chatHistory.length > 100) {
