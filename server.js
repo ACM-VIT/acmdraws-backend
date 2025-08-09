@@ -45,16 +45,16 @@ function generateId() {
 
 let words = [];
 try {
-  const dictionaryPath = path.join(__dirname, 'public', 'dictionary.json');
+  const dictionaryPath = path.join(__dirname, 'public', 'dictionaryy.json');
   const dictionaryContent = fs.readFileSync(dictionaryPath, 'utf8');
   words = JSON.parse(dictionaryContent);
   console.log(`Loaded ${words.length} words from dictionary.json`);
 } catch (error) {
   console.error('Error loading dictionary.json:', error);
   words = [
-    'apple', 'banana', 'orange', 'strawberry', 'grape',
-    'car', 'bus', 'train', 'airplane', 'bicycle',
-    'dog', 'cat', 'elephant', 'tiger', 'lion'
+  'stIng', 'Labubu', 'dingDing', 'bEnten', 'coffIn',
+  'braiNrot', 'cricKet', 'alterNate', 'ryan', 'binary',
+  'janice', 'scrunchie', 'wikipedia', 'kingfisher', 'aasasbeard', 'mannu'
   ];
   console.log('Using fallback word list');
 }
