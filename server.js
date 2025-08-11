@@ -52,10 +52,12 @@ try {
 } catch (error) {
   console.error('Error loading dictionary.json:', error);
   words = [
-  'stIng', 'Labubu', 'dingDing', 'bEnten', 'coffIn',
-  'braiNrot', 'cricKet', 'alterNate', 'ryan', 'binary',
-  'janice', 'scrunchie', 'wikipedia', 'kingfisher', 'aasasbeard', 'mannu'
+    'stIng', 'Labubu', 'dingDing', 'bEnten', 'coffIn',
+    'braiNrot', 'cricKet', 'alterNate', 'ryan', 'binary',
+    'janice', 'scrunchie', 'wikipedia', 'kingfisher', 'aasasbeard',
+    'mannu'
   ];
+  let usedWords = new Set();
   console.log('Using fallback word list');
 }
 
@@ -95,8 +97,23 @@ function findRoomByClientId(clientId) {
 }
 
 function getRandomWords(count = 3) {
-  const shuffled = [...words].sort(() => 0.5 - Math.random());
-  return shuffled.slice(0, count);
+  // Filter out already used words
+  const availableWords = words.filter(word => !usedWords.has(word));
+  
+  // If we've used all words, reset the used words tracking
+  if (availableWords.length < count) {
+    usedWords.clear();
+    return getRandomWords(count);
+  }
+  
+  // Get random words from available words
+  const shuffled = [...availableWords].sort(() => 0.5 - Math.random());
+  const selectedWords = shuffled.slice(0, count);
+  
+  // Add selected words to used words set
+  selectedWords.forEach(word => usedWords.add(word));
+  
+  return selectedWords;
 }
 
 function createRoomState(isPublic = false, hostId, hostUsername, hostAvatar) {
