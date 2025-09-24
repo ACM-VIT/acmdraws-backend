@@ -44,6 +44,7 @@ function generateId() {
 }
 
 let words = [];
+let usedWords = new Set();
 try {
   const dictionaryPath = path.join(__dirname, 'public', 'dictionaryy.json');
   const dictionaryContent = fs.readFileSync(dictionaryPath, 'utf8');
@@ -57,7 +58,6 @@ try {
     'janice', 'scrunchie', 'wikipedia', 'kingfisher', 'aasasbeard',
     'mannu'
   ];
-  let usedWords = new Set();
   console.log('Using fallback word list');
 }
 
